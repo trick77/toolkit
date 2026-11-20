@@ -403,15 +403,22 @@ func TestDefault_ShippedRatesMatchTheVendorPages(t *testing.T) {
 		input, cacheRead, cacheWrite, out rate
 		hasOutput                         bool
 	}{
-		{id: "glm-5.3-flash", input: 150_000_000, cacheRead: 30_000_000, cacheWrite: 0, out: 500_000_000, hasOutput: true},
+		{id: "glm-5.3-flash", input: 150_000_000, cacheRead: 30_000_000, cacheWrite: 150_000_000, out: 500_000_000, hasOutput: true},
 		// V2.6 is priced exactly as the retired V2.5 pair was. models.dev
 		// carries no v2.6 entry, so these have no third-party cross-check and
 		// this test is the only thing pinning them.
-		{id: "mimo-v2.6-pro", input: 435_000_000, cacheRead: 3_600_000, cacheWrite: 0, out: 870_000_000, hasOutput: true},
-		{id: "mimo-v2.6-flash", input: 140_000_000, cacheRead: 2_800_000, cacheWrite: 0, out: 280_000_000, hasOutput: true},
-		// cache_write is 0 against the page's 2.50 until a probe reads the
-		// containment of cache_write_tokens (profiles.yaml cost comment).
-		{id: "gpt-6.1-sol", input: 2_000_000_000, cacheRead: 100_000_000, cacheWrite: 0, out: 10_000_000_000, hasOutput: true},
+		{id: "mimo-v2.6-pro", input: 435_000_000, cacheRead: 3_600_000, cacheWrite: 435_000_000, out: 870_000_000, hasOutput: true},
+		{id: "mimo-v2.6-flash", input: 140_000_000, cacheRead: 2_800_000, cacheWrite: 140_000_000, out: 280_000_000, hasOutput: true},
+		// No write surcharge on these pages: a written token bills as input,
+		// and writes sit inside input_tokens (usage.go head comment).
+		{id: "gpt-5.4-mini", input: 750_000_000, cacheRead: 75_000_000, cacheWrite: 750_000_000, out: 4_500_000_000, hasOutput: true},
+		{id: "gpt-5.4", input: 2_500_000_000, cacheRead: 250_000_000, cacheWrite: 2_500_000_000, out: 15_000_000_000, hasOutput: true},
+		{id: "gpt-5.5", input: 5_000_000_000, cacheRead: 500_000_000, cacheWrite: 5_000_000_000, out: 30_000_000_000, hasOutput: true},
+		// cache_write 2.50, the 30-minute lane: writes measured inside
+		// input_tokens on gpt-6.2-sol (usage.go head comment). Same rates on
+		// both, pricing page 2026-11-20.
+		{id: "gpt-6.1-sol", input: 2_000_000_000, cacheRead: 100_000_000, cacheWrite: 2_500_000_000, out: 10_000_000_000, hasOutput: true},
+		{id: "gpt-6.2-sol", input: 2_000_000_000, cacheRead: 100_000_000, cacheWrite: 2_500_000_000, out: 10_000_000_000, hasOutput: true},
 		// Pricing page 2026-10-26 (Opus) and the skill reference 2026-11-03
 		// (Fable); cache_write is the 5-minute lane.
 		{id: "claude-opus-5-5", input: 4_000_000_000, cacheRead: 200_000_000, cacheWrite: 5_000_000_000, out: 20_000_000_000, hasOutput: true},

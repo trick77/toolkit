@@ -100,6 +100,10 @@ var evalRates = map[string]evalRate{
 	// cache write 5.00 (above long-context input 4.00) and output 15.00,
 	// against 2.00/10.00 under the threshold.
 	"gpt-6.1-sol": {5.00, 15.00},
+	// Pricing page 2026-11-20, the same rates as gpt-6.1-sol: long-context
+	// 30-minute cache write 5.00, output 15.00. Fast (2x) and Ultrafast (3x,
+	// 6x from 2027-03-01) are service_tier lanes no probe sends.
+	"gpt-6.2-sol": {5.00, 15.00},
 	// Pricing page 2026-10-26: the dearest input lane is the one-hour cache
 	// write at 8.00 (base input 4.00); output 20.00. Fast mode (2x) is
 	// refused in plan, so its 40.00 is not a lane a probe reaches.
@@ -271,6 +275,8 @@ var (
 	// anthropicEndpoint is below plan, for RawPost probes of what plan
 	// refuses (thinking disabled, forced tool choice, temperature).
 	anthropicEndpoint = endpoint{"anthropic", "LLMWIRE_ANTHROPIC_BASE_URL", "LLMWIRE_ANTHROPIC_API_KEY"}
+	// openaiEndpoint is below plan too, for the Responses probes' raw bodies.
+	openaiEndpoint = endpoint{"openai", "LLMWIRE_OPENAI_BASE_URL", "LLMWIRE_OPENAI_API_KEY"}
 )
 
 // client builds a Client for an endpoint, or skips with a named reason.

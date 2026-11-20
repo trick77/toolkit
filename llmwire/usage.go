@@ -23,11 +23,15 @@ import (
 //     billing lane; pricing it again double-counts every call a reasoning model
 //     makes, which is all of them on the models this library targets.
 //
-// ASSUMED, not measured: cache_write_tokens is billed as its own lane on top
-// of the full-rate input lane, so it is never subtracted. No OpenAI-shaped
-// endpoint in the registry reports it and every one of their cache_write rates
-// is 0, so the assumption has no effect there; the first to report the field
-// gets a containment probe before its rate is anything but 0.
+//   - prompt_tokens INCLUDES cache_write_tokens too. MEASURED on gpt-6.2-sol
+//     against api.openai.com, 2026-11-20: a cold 6428-token prompt reported
+//     cache_write_tokens 6425 and cached_tokens 0, the identical second call
+//     cached_tokens 6425 and cache_write_tokens 0, input_tokens 6428 both
+//     times. Written tokens bill at the cache_write rate, so they come out of
+//     the full-rate lane like reads do. This replaced an ASSUMPTION that
+//     writes sat beside the total, which no endpoint had reported until then.
+//     The 12-hour retention bills above the cache_write rate (ttl_12h_tokens
+//     in cache_write_tokens_details): pricing refuses a call carrying any.
 //
 // The Messages protocol is the other shape, and MEASURED: input_tokens is the
 // uncached remainder, cache reads and writes sit beside it, and its usage is
@@ -87,11 +91,21 @@ type Usage struct {
 	// The tags above exist for logging and fixtures, not for reconstruction;
 	// a Usage rebuilt from JSON answers Reported() false whatever it carries.
 	reported bool
-	// longCacheWrite is the part of CacheWrite written with Anthropic's
-	// one-hour TTL, billed at 2x input where the five-minute write the
-	// cache_write rate holds is 1.25x. Pricing refuses a call carrying any:
-	// the table has no lane for it, and the 5m rate would under-report.
+	// longCacheWrite is the part of CacheWrite written with the vendor's long
+	// TTL, which bills above the cache_write rate the table holds: Anthropic's
+	// one hour (2x input against the five-minute 1.25x), OpenAI's 12 hours
+	// (5.00 against the 30-minute 2.50 on gpt-6.2-sol). Pricing refuses a call
+	// carrying any: the table has no lane for it, and the short rate would
+	// under-report.
 	longCacheWrite *int64
+	// cacheOverflow says CacheRead plus CacheWrite exceeded Total on the
+	// OpenAI shape, so NoCache was clamped to 0. Containment is measured on
+	// one model only. A vendor sending writes BESIDE prompt_tokens lands here
+	// only when its cache lanes outgrow the prompt total (a long cached
+	// prefix, a short uncached tail: the usual cache shape). A smaller beside
+	// write under-reports without this flag. Pricing still prices (an
+	// under-count beats Unpriced's 0) and warns.
+	cacheOverflow bool
 }
 
 // Reported says the endpoint sent a usage object with something in it, so a
@@ -138,16 +152,17 @@ func Tokens(lane *int64) int64 {
 // tokens; the rest break that total down where the endpoint says.
 type InputTokens struct {
 	Total *int64 `json:"total,omitempty"`
-	// NoCache is Total minus CacheRead — the tokens billed at the full input
-	// rate. Derived, not reported: no endpoint sends it.
+	// NoCache is Total minus CacheRead and CacheWrite — the tokens billed at
+	// the full input rate. Derived, not reported: no endpoint sends it.
 	NoCache *int64 `json:"no_cache,omitempty"`
 	// CacheRead is prompt_tokens_details.cached_tokens: prompt tokens the
 	// endpoint served from its own cache, billed at a reduced rate.
 	CacheRead *int64 `json:"cache_read,omitempty"`
-	// CacheWrite is tokens written INTO the cache. Free on every model this
-	// library currently targets, and billed at a premium on newer OpenAI
-	// models, which is why it is a lane of its own rather than folded into
-	// NoCache.
+	// CacheWrite is tokens written INTO the cache, priced at cache_write
+	// INSTEAD of input: inside Total on the OpenAI shape (measured
+	// gpt-6.2-sol), beside it on Messages. A vendor without a write premium
+	// carries cache_write equal to input, so the lane is a premium only where
+	// one is published (2.50 against 2.00 input on gpt-6.2-sol).
 	CacheWrite *int64 `json:"cache_write,omitempty"`
 }
 
@@ -170,13 +185,10 @@ type OutputTokens struct {
 // "usage": null on a non-final chunk, and a missing field must decode as "not
 // reported" rather than failing the whole response.
 type wireUsage struct {
-	PromptTokens        *int64 `json:"prompt_tokens"`
-	CompletionTokens    *int64 `json:"completion_tokens"`
-	TotalTokens         *int64 `json:"total_tokens"`
-	PromptTokensDetails *struct {
-		CachedTokens     *int64 `json:"cached_tokens"`
-		CacheWriteTokens *int64 `json:"cache_write_tokens"`
-	} `json:"prompt_tokens_details"`
+	PromptTokens            *int64             `json:"prompt_tokens"`
+	CompletionTokens        *int64             `json:"completion_tokens"`
+	TotalTokens             *int64             `json:"total_tokens"`
+	PromptTokensDetails     *wirePromptDetails `json:"prompt_tokens_details"`
 	CompletionTokensDetails *struct {
 		ReasoningTokens *int64 `json:"reasoning_tokens"`
 		TextTokens      *int64 `json:"text_tokens"`
@@ -186,16 +198,24 @@ type wireUsage struct {
 	// containment, MEASURED on gpt-6.1-sol: input_tokens 97 beside
 	// cached_tokens 0, output_tokens 54 holding reasoning_tokens 34. An object
 	// carries one spelling or the other; Chat Completions' wins if both.
-	InputTokens        *int64 `json:"input_tokens"`
-	OutputTokens       *int64 `json:"output_tokens"`
-	InputTokensDetails *struct {
-		CachedTokens     *int64 `json:"cached_tokens"`
-		CacheWriteTokens *int64 `json:"cache_write_tokens"`
-	} `json:"input_tokens_details"`
+	InputTokens         *int64             `json:"input_tokens"`
+	OutputTokens        *int64             `json:"output_tokens"`
+	InputTokensDetails  *wirePromptDetails `json:"input_tokens_details"`
 	OutputTokensDetails *struct {
 		ReasoningTokens *int64 `json:"reasoning_tokens"`
 		TextTokens      *int64 `json:"text_tokens"`
 	} `json:"output_tokens_details"`
+}
+
+// wirePromptDetails is the prompt side's breakdown, the same object under
+// both spellings. Cache writes split by retention: gpt-6.2-sol reports
+// ttl_30m_tokens and ttl_12h_tokens under cache_write_tokens_details.
+type wirePromptDetails struct {
+	CachedTokens            *int64 `json:"cached_tokens"`
+	CacheWriteTokens        *int64 `json:"cache_write_tokens"`
+	CacheWriteTokensDetails *struct {
+		TTL12h *int64 `json:"ttl_12h_tokens"`
+	} `json:"cache_write_tokens_details"`
 }
 
 // normalize folds the Responses spelling into the Chat Completions one, so
@@ -250,6 +270,9 @@ func parseUsage(raw json.RawMessage) Usage {
 	if d := w.PromptTokensDetails; d != nil {
 		u.Input.CacheRead = nonNegative(d.CachedTokens)
 		u.Input.CacheWrite = nonNegative(d.CacheWriteTokens)
+		if dd := d.CacheWriteTokensDetails; dd != nil {
+			u.longCacheWrite = nonNegative(dd.TTL12h)
+		}
 	}
 	if d := w.CompletionTokensDetails; d != nil {
 		u.Output.Reasoning = nonNegative(d.ReasoningTokens)
@@ -267,7 +290,9 @@ func parseUsage(raw json.RawMessage) Usage {
 	// operands arrive from the wire, and a cached count exceeding the prompt
 	// count would otherwise produce a negative input lane, which at pricing
 	// time CREDITS the caller for tokens they actually spent.
-	u.Input.NoCache = subClamped(u.Input.Total, u.Input.CacheRead)
+	u.Input.NoCache = subClamped(subClamped(u.Input.Total, u.Input.CacheRead), u.Input.CacheWrite)
+	u.cacheOverflow = u.Input.Total != nil &&
+		Tokens(u.Input.CacheRead)+Tokens(u.Input.CacheWrite) > *u.Input.Total
 	if u.Output.Text == nil {
 		u.Output.Text = subClamped(u.Output.Total, u.Output.Reasoning)
 	}

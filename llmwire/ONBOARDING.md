@@ -177,6 +177,12 @@ LLMWIRE_EVAL=1 go test -run Probe -v ./...            # all of them
 
 `-run Eval` matches nothing; every live test is `TestProbe_*`.
 
+A `wire_api: responses` or `messages` model skips the chat-completions
+tables below: add it to `responsesModels` (`eval_responses_test.go`) or
+`messagesModels` (`eval_messages_test.go`), whose probes cover the same bits
+per model. The meter is per process: a staged run (one `-run` per probe)
+needs its total added by hand.
+
 1. **`TestProbe_OutputCapParameter` first.** Every other probe hardcodes a cap
    name. On a glm-shaped endpoint the wrong name is ACCEPTED and IGNORED: a
    cap of 16 returned 481 tokens with `finish_reason: stop`. A probe sending
@@ -246,7 +252,7 @@ the alternative. Guessing is not.
 | empty content after an image drop | a text-only model, message whose only part was an image | accepted or 400 (`validate.go` `dropImages`, "whether these endpoints accept an empty content string") | |
 | `embedding.dimensions`, `embedding.default_dimensions` | a call with no `dimensions`, read the vector length; then `dimensions: 256` | length → `default_dimensions`; shorter vector back → `dimensions: true`; 400 → `false` | zero embeddings probes exist today; `text-embedding-3-*` are source-derived |
 | embeddings over-length, batch order | an input past the per-input ceiling; a batch of 3 | rejected not truncated; `data[].index` order (`embed.go`, "WHAT IS DELIBERATELY NOT CHECKED") | |
-| `cost.cache_write` | the containment probe's second call, read `cache_write_tokens` if the vendor has it | 0 because "Limited-time Free" is a promotion, comment says so with the date | most vendors report no write lane at all |
+| `cost.cache_write` | the containment probe's FIRST (cold) call: `cache_write_tokens` inside or beside the prompt total | the published write rate; no write premium ("-", no column, "Limited-time Free") → equal to `input`. Never 0 unless writes are provably free: the lane is priced INSTEAD of input | most vendors report no write lane at all |
 | `cost.tiers` | a prompt past the documented tier threshold, compare the LiteLLM/vendor-reported cost | only with a vendor doc naming the threshold; `min_input_tokens` unique and positive, `multiplier_permille` >= 1000 | |
 | `cost.windows`, `cost.outside_windows_permille` | nothing ships attached; both vendors document off-peak as a coefficient on CREDIT burn, not the USD lane (`pricing.go` `Windows` comment, FINDINGS "Still open") | attach only after a measurement shows the USD invoice moving; `zone` IANA, `from`/`to` `HH:MM` no midnight wrap, `days` Mon..Sun, no overlap | |
 

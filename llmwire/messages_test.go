@@ -310,7 +310,7 @@ func TestMessagesUsage_Lanes(t *testing.T) {
 	long := parseMessagesUsage(json.RawMessage(`{"input_tokens":4,"cache_creation_input_tokens":100,` +
 		`"cache_creation":{"ephemeral_1h_input_tokens":100},"output_tokens":4}`))
 	cost, warnings = priceCall(p, long, nil, 200, testStart)
-	if cost.Provenance != Unpriced || len(warnings) != 1 || !strings.Contains(warnings[0].Details, "one-hour") {
+	if cost.Provenance != Unpriced || len(warnings) != 1 || !strings.Contains(warnings[0].Details, "long-retention") {
 		t.Errorf("1h write = %+v %v", cost, warnings)
 	}
 

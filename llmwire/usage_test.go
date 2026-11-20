@@ -43,6 +43,39 @@ func TestParseUsage_CacheLaneIsSubtractedNotAdded(t *testing.T) {
 	}
 }
 
+// The measured gpt-6.2-sol pair (usage.go head comment): input_tokens holds
+// the write as it holds the read, so both come out of the full-rate lane, and
+// the pair prices on the 30-minute write rate, then the read rate.
+func TestParseUsage_CacheWriteIsInsideThePrompt(t *testing.T) {
+	write := parseUsage(json.RawMessage(`{"input_tokens":6428,"input_tokens_details":{"cache_write_tokens":6425,` +
+		`"cache_write_tokens_details":{"ttl_12h_tokens":0,"ttl_30m_tokens":6425},"cached_tokens":0},"output_tokens":5}`))
+	if Tokens(write.Input.Total) != 6428 || Tokens(write.Input.NoCache) != 3 || Tokens(write.Input.CacheWrite) != 6425 {
+		t.Errorf("write = %+v", write.Input)
+	}
+	read := parseUsage(json.RawMessage(`{"input_tokens":6428,"input_tokens_details":{"cache_write_tokens":0,` +
+		`"cached_tokens":6425},"output_tokens":5}`))
+	if Tokens(read.Input.NoCache) != 3 || Tokens(read.Input.CacheRead) != 6425 {
+		t.Errorf("read = %+v", read.Input)
+	}
+
+	p := mustLookup(t, Default(), "gpt-6.2-sol")
+	// 3 x 2.00 + 6425 x 2.50 + 5 x 10.00 per million.
+	if cost, w := priceCall(p, write, nil, 200, testStart); cost.Provenance != FromTable || cost.NanoUSD != 16_118_500 {
+		t.Errorf("write cost = %+v %v", cost, w)
+	}
+	// 3 x 2.00 + 6425 x 0.10 + 5 x 10.00 per million.
+	if cost, w := priceCall(p, read, nil, 200, testStart); cost.Provenance != FromTable || cost.NanoUSD != 698_500 {
+		t.Errorf("read cost = %+v %v", cost, w)
+	}
+
+	// A 12-hour write bills at 5.00, above the lane: unpriced, not under-priced.
+	long := parseUsage(json.RawMessage(`{"input_tokens":200,"input_tokens_details":{"cache_write_tokens":100,` +
+		`"cache_write_tokens_details":{"ttl_12h_tokens":100}},"output_tokens":5}`))
+	if cost, w := priceCall(p, long, nil, 200, testStart); cost.Provenance != Unpriced || len(w) != 1 {
+		t.Errorf("12h write = %+v %v", cost, w)
+	}
+}
+
 // completion_tokens INCLUDES reasoning_tokens. Pricing reasoning separately
 // double-counts every call these models make.
 func TestParseUsage_ReasoningIsInsideCompletion(t *testing.T) {
@@ -70,6 +103,36 @@ func TestParseUsage_NegativeLaneIsClampedToZero(t *testing.T) {
 	u := parseUsage(json.RawMessage(`{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":9999}}`))
 	if got := *u.Input.NoCache; got != 0 {
 		t.Errorf("no-cache lane = %d, want 0 — a negative lane would credit the caller", got)
+	}
+}
+
+// Containment is measured on one model. A vendor reporting writes BESIDE
+// prompt_tokens trips the clamp, and its full-rate tokens must not vanish
+// without a word: still priced, with a warning. The measured inside shape and
+// the Messages lanes (beside by design, Total added) stay quiet.
+func TestPrice_CacheOverflowWarns(t *testing.T) {
+	p := mustLookup(t, Default(), "gpt-6.2-sol")
+	beside := parseUsage(json.RawMessage(`{"input_tokens":100,"input_tokens_details":{"cache_write_tokens":6000,` +
+		`"cached_tokens":50},"output_tokens":5}`))
+	if Tokens(beside.Input.NoCache) != 0 {
+		t.Errorf("no-cache lane = %d, want the clamp's 0", Tokens(beside.Input.NoCache))
+	}
+	cost, w := priceCall(p, beside, nil, 200, testStart)
+	if cost.Provenance != FromTable || cost.NanoUSD == 0 || len(w) != 1 || w[0].Feature != "cost" {
+		t.Errorf("beside = %+v %v, want a table price and one cost warning", cost, w)
+	}
+
+	inside := parseUsage(json.RawMessage(`{"input_tokens":6428,"input_tokens_details":{"cache_write_tokens":6425,` +
+		`"cached_tokens":0},"output_tokens":5}`))
+	if _, w := priceCall(p, inside, nil, 200, testStart); len(w) != 0 {
+		t.Errorf("measured inside shape warned: %v", w)
+	}
+
+	opus := mustLookup(t, Default(), "claude-opus-5-5")
+	msgs := parseMessagesUsage(json.RawMessage(`{"input_tokens":4,"cache_creation_input_tokens":11215,` +
+		`"cache_read_input_tokens":300,"output_tokens":5}`))
+	if _, w := priceCall(opus, msgs, nil, 200, testStart); len(w) != 0 {
+		t.Errorf("Messages lanes warned: %v", w)
 	}
 }
 

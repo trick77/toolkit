@@ -208,6 +208,38 @@ func TestDefault_MeasuredFactsMatchFindings(t *testing.T) {
 			t.Error("MessagesConversationShapes: a prefill is a 400")
 		}
 	})
+
+	t.Run("gpt-6.2-sol as the Responses probes read it", func(t *testing.T) {
+		p := mustLookup(t, reg, "gpt-6.2-sol")
+		if p.Verified != VerifiedMeasured || p.WireAPI != WireResponses {
+			t.Errorf("verified %q wire_api %q; ResponsesChatCompletionsTools: tools with reasoning are a 400 on chat",
+				p.Verified, p.WireAPI)
+		}
+		if p.MaxTokensParam != ParamMaxOutputTokens {
+			t.Errorf("ResponsesOutputCap: max_tokens_param = %q, a cap of 16 was honoured", p.MaxTokensParam)
+		}
+		if p.Reasoning.CanBeDisabled || !p.Reasoning.EnabledByDefault || p.Reasoning.DefaultEffort != "medium" {
+			t.Error("ResponsesEffortLadder: none is a 400, and no knob echoed effort medium")
+		}
+		if got := strings.Join(p.Reasoning.EffortValues, ","); got != "low,medium,high,xhigh,max" {
+			t.Errorf("ResponsesEffortLadder: effort_values = %s; none and minimal were refused", got)
+		}
+		for _, s := range []Sampling{p.Temperature, p.TopP} {
+			if s.ForcedValue == nil || *s.ForcedValue != 1.0 {
+				t.Error("ResponsesSampling: 0.5 is a 400, 1.0 accepted")
+			}
+		}
+		if !p.Tools.SupportsForcedChoice || !p.Tools.SupportsParallel ||
+			strings.Join(p.Tools.ToolChoiceValues, ",") != "auto,required,none" {
+			t.Errorf("ResponsesToolChoice: required, forced, none and two calls in one turn all honoured: %+v", p.Tools)
+		}
+		if !p.Output.JSONObject || !p.Output.JSONSchema || !p.Output.StrictSchema {
+			t.Error("ResponsesStructuredOutput: json_schema strict and json_object both parsed")
+		}
+		if p.Cost == nil || p.Cost.CacheWrite == nil || *p.Cost.CacheWrite != 2_500_000_000 {
+			t.Error("ResponsesCacheContainment: writes reported inside input_tokens, priced at the 30-minute 2.50")
+		}
+	})
 }
 
 // Every profile must say how its facts were established, so a reader can tell a
