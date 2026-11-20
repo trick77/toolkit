@@ -178,6 +178,8 @@ func TestReasoningIntents_ShippedProfiles(t *testing.T) {
 		{"gpt-5.5", "off", "medium", "medium"},
 		// No none on the page: the floor is low.
 		{"gpt-6.1-sol", "low", "medium", "medium"},
+		// none measured refused: the floor is low.
+		{"gpt-6.2-sol", "low", "medium", "high"},
 		// Always thinks: the floor is low.
 		{"claude-opus-5-5", "low", "medium", "high"},
 		{"claude-fable-5-2", "low", "medium", "high"},

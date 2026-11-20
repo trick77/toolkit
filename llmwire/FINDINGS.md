@@ -484,6 +484,59 @@ recorded: the spread has no single figure.
 Not measured: vision, parallel tool calls, refusal `stop_details`, a deep pass
 to completion.
 
+### `gpt-6.2-sol`
+
+Measured on 2026-11-20 against `api.openai.com/v1` directly, the first OpenAI
+chat model probed there: the `Responses*` probes (`eval_responses_test.go`),
+typed through `FromEnv`, raw through `RawPost`. 38 calls over seven
+invocations (two of them reruns after probe fixes), about $0.078 at the
+harness's 5.00/15.00 over-bound, roughly $0.03 at list.
+
+| bit | value | probe |
+|---|---|---|
+| `max_tokens_param` | **`max_output_tokens`, honoured**: 16 → `incomplete`/`max_output_tokens`, 16 tokens | `ResponsesOutputCap` |
+| `reasoning.effort_values` | **low, medium, high, xhigh, max**; `none` and `minimal` a 400 `unsupported_value` | `ResponsesEffortLadder` |
+| `reasoning.enabled_by_default` / `default_effort` | **true / medium**: no knob, 9 reasoning tokens, `"effort": "medium"` echoed | `ResponsesEffortLadder` |
+| `temperature` / `top_p` | **forced 1.0**: 0.5 a 400 "Unsupported parameter: 'temperature' is not supported with this model.", 1.0 accepted | `ResponsesSampling` |
+| `tool_choice_values` | **auto, required, none** and the forced function, each honoured | `ResponsesToolChoice` |
+| `supports_parallel` | **true**: two calls in one turn | `ResponsesToolChoice` |
+| encrypted reasoning replay | **accepted**, input 117 → 193 | `ResponsesToolLoop` |
+| `json_object` / `json_schema` / `strict_schema` | **true**, parsed | `ResponsesStructuredOutput` |
+| usage containment | **cached AND cache_write INSIDE input_tokens** | `ResponsesCacheContainment` |
+| streaming | **native**: first data 0.58s of 1.51s, 13 events, longest gap 0.82s | `ResponsesToolLoop` |
+| tools on Chat Completions | **refused** beside any `reasoning_effort` | `ResponsesChatCompletionsTools` |
+
+**Cache writes are reported and sit inside the prompt.** A cold 6428-token
+prompt: `input_tokens` 6428, `cache_write_tokens` 6425
+(`cache_write_tokens_details`: `ttl_30m_tokens` 6425, `ttl_12h_tokens` 0),
+`cached_tokens` 0. The identical second call: `input_tokens` 6428,
+`cached_tokens` 6425, `cache_write_tokens` 0. This refuted the assumption
+`usage.go` had carried since Phase 0 (writes beside the total, never
+subtracted, harmless only while every OpenAI-shaped `cache_write` rate was 0).
+`parseUsage` now subtracts writes as it subtracts reads, prices them on
+`cache_write` (2.50 on both Sol entries; the gpt-5.x entries, whose pages
+list no write surcharge, moved from 0 to their input rate so a write prices
+as before), and leaves a call with `ttl_12h_tokens` Unpriced.
+
+**It thinks little.** "Reply with ok" reported 0 reasoning tokens at `low`
+through `xhigh` and 16 at `max`. The cantons tool prompt that made
+`gpt-6.1-sol` reason reported 0 at `high` here, so `ResponsesToolLoop` asks for
+a digit sum (34 reasoning tokens).
+
+**Chat Completions refuses tools with reasoning**, as Azure did for 6.1:
+"Function tools with reasoning_effort are not supported for gpt-6.2-sol in
+/v1/chat/completions. To use function tools, use /v1/responses or set
+reasoning_effort to 'none'." The way out it names, `none`, is a value this
+model refuses.
+
+The request echo also carries reasoning fields llmwire does not send or model:
+`"context": "all_turns"`, `"mode": "standard"`.
+
+Latency: 1.1-1.6s to headers on every typed call.
+
+Not measured: vision, `limits`, a hard prompt's reasoning depth (no
+`overhead`), the 12-hour retention.
+
 ## Where the documentation is wrong
 
 | claim | source | measured |
@@ -499,6 +552,8 @@ to completion.
 | a published catalogue can price `mimo-v2.6-*` | models.dev | **no v2.6 entry exists at all** (2026-09-22); the vendor page is the only source, with no cross-check |
 | the vendor page carries USD rates for `mimo-v2.5*` | the `source_url` both V2.5 entries cite | **it no longer does**: the Overseas (USD) table lists only V2.6 ids, V2.5 survives only in the domestic RMB table marked "(deprecated)" |
 | `reasoning_effort` is a Responses-API parameter | vendor documentation, all MiMo models | **accepted on chat/completions with an enforced set**; `xhigh` is a 400 |
+| `gpt-6.2-sol` supports Chat Completions, function calling listed without restriction | OpenAI model page, 2026-11-20 | **tools refused there beside any effort**, and this model has no effort that lifts it |
+| set `reasoning_effort` to `'none'` to use tools on chat | the `gpt-6.2-sol` 400's own message | **`none` is a 400** on this model |
 
 Two further notes on error handling, both of which changed the code:
 
@@ -578,6 +633,18 @@ slowest. Each ran alone under `LLMWIRE_EVAL_MAX_CALLS=30`, a raised
 
 ## Still open
 
+- **`gpt-6.2-sol`: vision, limits, reasoning on a hard prompt.** All from the model page or untested; no `overhead`, so
+  `MaxAnswerTokens` adds `DefaultReasoningOverhead` at every level.
+- **Cache-write containment on `gpt-6.1-sol` itself.** Its 2.50 rides on the
+  `gpt-6.2-sol` measurement and the shared pricing page; behind a gateway the
+  block is dropped anyway.
+- **Whether `gpt-5.x`, Z.ai or MiMo report `cache_write_tokens`, and where.**
+  No write premium on their pages ("-", no column, or "Limited-time Free"), so
+  `cache_write` equals `input`: a reported write prices as it did when it
+  counted in the full-rate lane, inside or beside the prompt alike. No measured
+  usage object of theirs carries the field. One reported beside trips the
+  clamp warning (`cacheOverflow`) only when the cache lanes exceed the prompt
+  total; `TestProbe_ResponsesCacheContainment` names the write's side.
 - **Everything LiteLLM.** No instance was reachable. Header names, the cost-header
   parsing and the error shapes remain source-derived at v1.100.1 and unverified.
 - ~~**Token Plan credit rates.**~~ **Closed by policy, not by measurement.** Credits

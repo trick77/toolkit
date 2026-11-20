@@ -55,9 +55,10 @@ downgrade. Fully resolved at load: no call-site defaults.
 ## Usage and cost
 
 - Usage fields are **pointers**: "not reported" is not zero.
-- `prompt_tokens` **includes** `cached_tokens`; `completion_tokens` **includes**
-  `reasoning_tokens`. Subtract, never add. Messages differs: cache lanes sit
-  **beside** `input_tokens`, added.
+- `prompt_tokens` **includes** `cached_tokens` and `cache_write_tokens`
+  (measured gpt-6.2-sol); `completion_tokens` **includes** `reasoning_tokens`.
+  Subtract, never add. Messages differs: cache lanes sit **beside**
+  `input_tokens`, added.
 - Priced **per call** with the model that ran; totals sum prices, never tokens.
 - **Always USD at the vendor's list rate**, plan credits too: an equivalent,
   **not an invoice**. No rate → `Unpriced` → 0 **with a warning**.

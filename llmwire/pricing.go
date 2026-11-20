@@ -560,15 +560,17 @@ func priceCall(p *Profile, u Usage, hdr http.Header, status int, at time.Time) (
 		return unpriced("model %q reported no completion tokens, so the call cannot be priced", p.ID)
 	}
 	if Tokens(u.longCacheWrite) > 0 {
-		// Only reachable through ExtraBody cache_control with ttl 1h: llmwire
-		// sends no cache_control of its own.
-		return unpriced("model %q wrote %d tokens to the one-hour cache, which bills above the cache_write rate "+
+		// Only reachable through ExtraBody (cache_control with ttl 1h on
+		// Messages, a 12-hour prompt cache retention on OpenAI): llmwire asks
+		// for neither.
+		return unpriced("model %q wrote %d tokens to the long-retention cache, which bills above the cache_write rate "+
 			"this table holds", p.ID, *u.longCacheWrite)
 	}
 
 	b := p.Cost
-	// Cache reads are SUBTRACTED, not added: prompt_tokens already includes
-	// cached_tokens, and parseUsage has derived and clamped NoCache. Reasoning is
+	// Cache reads and writes are SUBTRACTED, not added: prompt_tokens already
+	// includes both, and parseUsage has derived and clamped NoCache (Messages
+	// reports them beside input_tokens and derives the same lanes). Reasoning is
 	// never a lane of its own — completion_tokens already contains it, so pricing
 	// Output.Reasoning as well would double-count every call these models make.
 	//
@@ -600,13 +602,23 @@ func priceCall(p *Profile, u Usage, hdr http.Header, status int, at time.Time) (
 		return unpriced("model %q: the call is too large to price: %v", p.ID, err)
 	}
 
-	return Cost{
+	cost := Cost{
 		NanoUSD:    nano,
 		Provenance: FromTable,
 		AppliedAt:  at,
 		Window:     window,
 		Tier:       tier,
-	}, nil
+	}
+	if u.cacheOverflow {
+		return cost, []Warning{{
+			Kind:    WarnOther,
+			Feature: "cost",
+			Details: fmt.Sprintf("model %q reported %d cache-read plus %d cache-write tokens against %d prompt tokens; "+
+				"the full-rate lane was clamped to 0, so the price may under-report",
+				p.ID, Tokens(u.Input.CacheRead), Tokens(u.Input.CacheWrite), *u.Input.Total),
+		}}
+	}
+	return cost, nil
 }
 
 // addLane adds one lane's tokens x rate into the running total. A nil count

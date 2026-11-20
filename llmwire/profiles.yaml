@@ -194,10 +194,12 @@ profiles:
     # This is what source_url and verified_on are for. A catalogue is a
     # cross-check, never a source.
     #
-    # cache_write is 0 because the vendor lists cached-input storage as
-    # "Limited-time Free". That is a promotion, not a property: when it ends this
-    # becomes a real rate, and the 0 here is an explicit measurement of what the
-    # page said on verified_on, not an assumption that the lane is free.
+    # cache_write equals input. The vendor lists cached-input storage as
+    # "Limited-time Free": a promotion, not a property, and no write premium.
+    # A written token therefore bills as input. The lane is priced INSTEAD of
+    # input (usage.go head comment), so 0 would make a write free. It was 0
+    # while writes were assumed beside the prompt. NOT measured: no usage object
+    # of this vendor has carried cache_write_tokens, so the lane is moot today.
     #
     # cache_read MEASURED 2026-09-13: cached_tokens sits INSIDE prompt_tokens
     # (9208 prompt / 0 cached, then 9208 / 9152 on the identical prompt), on
@@ -213,7 +215,7 @@ profiles:
     cost:
       input: 0.15
       cache_read: 0.03
-      cache_write: 0
+      cache_write: 0.15
       output: 0.50
       source_url: https://docs.z.ai/guides/overview/pricing
       verified_on: 2026-09-12
@@ -421,8 +423,11 @@ profiles:
     # third-party figure to disagree with; this one stands on the vendor page
     # alone. The rates happen to equal mimo-v2.5-pro's exactly.
     #
-    # cache_write 0: the vendor lists cache writes as "Limited-time Free" — a
-    # promotion as of verified_on, not a property of the lane.
+    # cache_write equals input: the vendor lists cache writes as "Limited-time
+    # Free", a promotion as of verified_on that means no premium. The lane is
+    # priced INSTEAD of input (usage.go head comment), so 0 would make a written
+    # token free. NOT measured: no MiMo usage object has carried
+    # cache_write_tokens.
     #
     # Not attached, deliberately: the page also advertises a 50% Batch API
     # discount for this model. Batch is a different route with its own latency
@@ -430,7 +435,7 @@ profiles:
     cost:
       input: 0.435
       cache_read: 0.0036
-      cache_write: 0
+      cache_write: 0.435
       output: 0.87
       source_url: https://mimo.mi.com/docs/en-US/price/pay-as-you-go
       verified_on: 2026-09-22
@@ -596,13 +601,13 @@ profiles:
 
     # Same page, same table, same caveats as mimo-v2.6-pro above: list USD rate
     # rather than the credit invoice this route bills, no models.dev entry to
-    # cross-check against, cache_write a promotion, and the 50% Batch API
+    # cross-check against, cache_write equal to input, and the 50% Batch API
     # discount deliberately not modelled as a window. Rates equal mimo-v2.5's
     # exactly.
     cost:
       input: 0.14
       cache_read: 0.0028
-      cache_write: 0
+      cache_write: 0.14
       output: 0.28
       source_url: https://mimo.mi.com/docs/en-US/price/pay-as-you-go
       verified_on: 2026-09-22
@@ -755,13 +760,17 @@ profiles:
     # NOT measured, model page: text and image in, text out.
     vision: true
 
-    # Pricing page, standard tier, same figures on the model page. cache_write
-    # is 0: OpenAI charges nothing to write the prompt cache. Behind a gateway
-    # this block is dropped and the proxy's own figure is used (Profile.resolve).
+    # Pricing page, standard tier, same figures on the model page. Re-read
+    # 2026-11-20: this model's table has no cache-write column at all (and
+    # gpt-5.4 / gpt-5.5 show "-" in theirs), so a written token bills as
+    # input: cache_write equals input. It was 0 while writes were assumed
+    # beside the prompt; measured INSIDE on gpt-6.2-sol (usage.go head
+    # comment), 0 would price them at nothing. Behind a gateway this block is
+    # dropped and the proxy's own figure is used (Profile.resolve).
     cost:
       input: 0.75
       cache_read: 0.075
-      cache_write: 0
+      cache_write: 0.75
       output: 4.50
       source_url: https://developers.openai.com/api/docs/pricing
       verified_on: 2026-09-15
@@ -841,12 +850,14 @@ profiles:
     # NOT measured, model page: text and image in, text out.
     vision: true
 
-    # Model page, standard tier, under 272K input tokens. cache_write 0 as for
-    # mini. Behind a gateway this block is dropped (Profile.resolve).
+    # Model page, standard tier, under 272K input tokens. cache_write equals
+    # input: the pricing page, re-read 2026-11-20, shows "-" in both write
+    # columns (mini's comment). Behind a gateway this block is dropped
+    # (Profile.resolve).
     cost:
       input: 2.50
       cache_read: 0.25
-      cache_write: 0
+      cache_write: 2.50
       output: 15.00
       source_url: https://developers.openai.com/api/docs/models/gpt-5.4
       verified_on: 2026-09-15
@@ -922,12 +933,14 @@ profiles:
     # NOT measured, model page: text and image in, text out.
     vision: true
 
-    # Model page, standard tier, under 272K input tokens. cache_write 0 as for
-    # the rest of the series. Behind a gateway this block is dropped.
+    # Model page, standard tier, under 272K input tokens. cache_write equals
+    # input: "-" in both write columns of the pricing page, re-read
+    # 2026-11-20 (gpt-5.4-mini's comment). Behind a gateway this block is
+    # dropped.
     cost:
       input: 5.00
       cache_read: 0.50
-      cache_write: 0
+      cache_write: 5.00
       output: 30.00
       source_url: https://developers.openai.com/api/docs/models/gpt-5.5
       verified_on: 2026-09-15
@@ -1026,17 +1039,17 @@ profiles:
     vision: true
 
     # Pricing page, standard tier, short context (<= 272K input tokens):
-    # 2.00 / 0.10 cached / 2.50 cache write / 10.00. cache_write is 0 HERE,
-    # not 2.50, per the usage.go head comment: no shipped cache_write rate is
-    # non-zero before a probe reads whether cache_write_tokens sits inside or
-    # beside prompt_tokens. Either way 0 UNDER-reports: inside, written tokens
-    # price at the input rate, 0.50 per million short; beside, they price at
-    # nothing, 2.50 short. 2.50 would over-report by 2.00 if inside. Behind a
+    # 2.00 / 0.10 cached / 2.50 cache write / 10.00, unchanged on the page
+    # re-read 2026-11-20. cache_write was 0 here
+    # until a probe read where cache_write_tokens sits: INSIDE input_tokens,
+    # MEASURED on gpt-6.2-sol on api.openai.com 2026-11-20 (usage.go head
+    # comment), NOT on this model. NoCache now excludes the written tokens,
+    # so 0 would price them at nothing; 2.50 is the page's rate. Behind a
     # gateway this block is dropped.
     cost:
       input: 2.00
       cache_read: 0.10
-      cache_write: 0
+      cache_write: 2.50
       output: 10.00
       # Model page: "Prompts with more than 272K input tokens are priced at
       # 2x input and cache rates and 1.5x output for the full request."
@@ -1063,6 +1076,160 @@ profiles:
       faked (nothing until the answer is complete) unless the gateway catalog
       aliases azure/<deployment>; there, size the header bound to the call.
       responses.go head comment.
+
+  # ---------------------------------------------------------------------------
+  # gpt-6.2-sol, from its model page (developers.openai.com/api/docs/models/
+  # gpt-6.2-sol) and the pricing page, read 2026-11-20. MEASURED 2026-11-20
+  # on api.openai.com directly, the first OpenAI chat profile probed there
+  # (eval_responses_test.go, FINDINGS.md). A new entry beside gpt-6.1-sol,
+  # nothing copied as measured.
+  #
+  # The page names no effort set and no default, only "The API rejects
+  # requests that set reasoning effort to `none`." It lists Chat Completions
+  # as supported and says nothing about tools needing Responses; the endpoint
+  # does (tools below).
+  # ---------------------------------------------------------------------------
+  - id: gpt-6.2-sol
+    display_name: GPT-6.2 Sol
+    endpoint: chat
+    wire_api: responses
+    wire_model_id: gpt-6.2-sol
+    provider: openai
+    verified: measured
+
+    # The Responses protocol's only cap spelling. MEASURED honoured
+    # (ResponsesOutputCap): 16 on a 300-word story returned status
+    # incomplete, reason max_output_tokens, 16 output tokens.
+    max_tokens_param: max_output_tokens
+
+    # MEASURED, ResponsesEffortLadder: low, medium, high, xhigh and max
+    # accepted; none and minimal a 400, code "unsupported_value", param
+    # "reasoning.effort": "Unsupported value: 'none' is not supported with
+    # the 'gpt-6.2-sol' model. Supported values are: 'low', 'medium', 'high',
+    # 'xhigh', and 'max'." An unknown level's 400 lists the API-wide set
+    # ('none', 'minimal', 'low', ..., 'max'), so a new vendor level would show
+    # there. A request with no knob reported 9 reasoning tokens on an
+    # arithmetic prompt and echoed "effort": "medium": thinks by default, at
+    # medium. ReasoningMinimal resolves to low, ReasoningOff is refused.
+    #
+    # It thinks little: "Reply with ok" reported 0 reasoning tokens at low
+    # through xhigh and 16 at max; the cantons tool prompt that made
+    # gpt-6.1-sol reason reported 0 at high, a digit-sum version 34.
+    reasoning:
+      supported: true
+      enabled_by_default: true
+      can_be_disabled: false
+      control: effort
+      effort_values: [low, medium, high, xhigh, max]
+      default_effort: medium
+      # NOT measured, a choice: the measured default, as on gpt-6.1-sol.
+      balanced: medium
+      # NOT measured, a choice: one above balanced, as on the Claude
+      # profiles. overhead ABSENT: DefaultReasoningOverhead applies; no probe
+      # made it think past 34 tokens, which says nothing about a hard prompt.
+      deep: high
+
+    # MEASURED, ResponsesSampling: 0.5 a 400, param "temperature",
+    # "Unsupported parameter: 'temperature' is not supported with this
+    # model." (top_p the same); 1.0 accepted for each, and echoed back as
+    # temperature 1, top_p 1. The gpt-5.x forced_value shape, unlike
+    # gpt-6.1-sol's Azure echo of top_p 0.98.
+    temperature:
+      supported: true
+      forced_value: 1.0
+    top_p:
+      supported: true
+      forced_value: 1.0
+
+    # MEASURED, ResponsesToolChoice: "Say hello." under required and under the
+    # forced {"type":"function","name":"get_weather"} each returned a
+    # get_weather call; none returned prose to "Call get_weather for Bern.";
+    # weather in Bern plus time in Zurich returned get_weather and get_time in
+    # one turn. ResponsesToolLoop: the encrypted reasoning replayed in round
+    # two was accepted (non-streamed; the stream probe re-ran round one).
+    #
+    # Chat Completions is NOT an option for tools, MEASURED
+    # (ResponsesChatCompletionsTools): a function tool with reasoning_effort
+    # low is a 400, param "reasoning_effort", "Function tools with
+    # reasoning_effort are not supported for gpt-6.2-sol in
+    # /v1/chat/completions. To use function tools, use /v1/responses or set
+    # reasoning_effort to 'none'." The same refusal as gpt-6.1-sol behind
+    # Azure, and its way out, 'none', is a value this model refuses.
+    tools:
+      supported: true
+      format: native
+      tool_choice_values: [auto, required, none]
+      supports_forced_choice: true
+      supports_parallel: true
+
+    # MEASURED, ResponsesStructuredOutput: text.format json_schema with strict
+    # true and json_object each accepted, the reply parsed.
+    output:
+      json_object: true
+      json_schema: true
+      strict_schema: true
+
+    # MEASURED: a native stream, first data frame at 0.58s of 1.51s, 13
+    # events, the longest gap 0.82s, usage on response.completed unasked.
+    # Responses has no stream_options.
+    streaming:
+      supported: true
+      needs_include_usage: false
+      accepts_stream_options: false
+
+    # NOT measured, model page: 1,050,000-token context, 128,000 maximum
+    # output, "Maximum input tokens: 922,000". Long-context pricing is the
+    # tier in the cost block.
+    limits:
+      context: 1050000
+      max_output: 128000
+
+    # NOT measured, model page: "Input modalities: text, image".
+    vision: true
+
+    # Pricing page 2026-11-20, standard tier, <= 272K input: 2.00 input,
+    # 0.10 cached, 2.50 cache write (30-minute retention), 10.00 output; the
+    # same rates as gpt-6.1-sol. MEASURED containment
+    # (ResponsesCacheContainment): a cold 6428-token prompt reported
+    # cache_write_tokens 6425 under ttl_30m_tokens, the identical second call
+    # cached_tokens 6425, input_tokens 6428 both times. Writes sit INSIDE the
+    # prompt as reads do, so 2.50 is the lane and NoCache excludes both
+    # (usage.go head comment). The 12-hour retention (5.00) is not a lane: a
+    # call reporting ttl_12h_tokens is Unpriced. llmwire asks for neither
+    # retention; 30 minutes is what the endpoint did unasked. Not modelled:
+    # Batch (0.5x), Fast (2x), Ultrafast (3x until 2027-02-28, then 6x), the
+    # background windows (-30%/-40%) and the 10% regional uplift, all
+    # service_tier or route choices llmwire does not make. No Flex row.
+    cost:
+      input: 2.00
+      cache_read: 0.10
+      cache_write: 2.50
+      output: 10.00
+      tiers:
+        - name: long-context
+          min_input_tokens: 272001
+          multiplier_permille: 2000
+          output_multiplier_permille: 1500
+      # Model page: "For requests with more than 272K input tokens, input and
+      # cache rates double and output costs 1.5 times the short-context rate
+      # for the full request." Pricing page long-context row 4.00 / 0.20 /
+      # 5.00 / 15.00 agrees.
+      source_url: https://developers.openai.com/api/docs/pricing
+      verified_on: 2026-11-20
+
+    notes: >-
+      Measured on api.openai.com. Speaks the Responses protocol (wire_api:
+      responses): Chat Completions refuses a function tool beside any
+      reasoning effort, and this model takes no effort that would lift that.
+      Always thinks, medium by default, and cannot be told not to; in
+      practice it thinks little (0-34 reasoning tokens on the probe prompts),
+      but no hard prompt was measured, so MaxAnswerTokens adds only
+      DefaultReasoningOverhead. A tool loop appends resp.Assistant() so the
+      encrypted reasoning goes back each round. temperature and top_p accept
+      only 1.0. Prompt caching is automatic and starts cold: writes are
+      reported and priced at the 30-minute rate. Calls took 1.1-1.6s to
+      headers on 2026-11-20; streams are native. The model page lists no
+      dated snapshot. responses.go head comment.
 
   # ---------------------------------------------------------------------------
   # Anthropic, its own API (provider anthropic, wire_api messages). Sources:

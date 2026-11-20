@@ -334,10 +334,16 @@ func TestPrice_TierSplitsInputAndOutput(t *testing.T) {
 	}
 }
 
-// The shipped gpt-6.1-sol tier: past 272K input the pricing page's long-context
-// row, 4.00 input / 15.00 output.
-func TestPrice_GPT61SolLongContext(t *testing.T) {
-	p := mustLookup(t, Default(), "gpt-6.1-sol")
+// The shipped Sol tiers: past 272K input the pricing page's long-context row,
+// 4.00 input / 15.00 output, the same on gpt-6.1-sol and gpt-6.2-sol.
+func TestPrice_SolLongContext(t *testing.T) {
+	for _, id := range []string{"gpt-6.1-sol", "gpt-6.2-sol"} {
+		t.Run(id, func(t *testing.T) { solLongContext(t, mustLookup(t, Default(), id)) })
+	}
+}
+
+func solLongContext(t *testing.T, p *Profile) {
+	t.Helper()
 	at := time.Unix(0, 0).UTC()
 	for _, tc := range []struct {
 		prompt   int64

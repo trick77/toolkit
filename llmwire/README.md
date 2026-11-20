@@ -216,8 +216,8 @@ Three wire protocols: OpenAI's `/chat/completions` and `/embeddings`, plus
 `/responses` for a model whose profile says `wire_api: responses`, and
 Anthropic's `/messages` for `wire_api: messages`. That is a profile fact, fixed
 at load: one model, one protocol, and `Chat`/`ChatStream` look the same
-whichever it is. `/responses` exists for gpt-6.1-sol, which takes tools while
-it reasons only there; `/messages` for Claude (claude-opus-5-5), whose own API
+whichever it is. `/responses` exists for gpt-6.1-sol and gpt-6.2-sol, which
+take tools while they reason only there; `/messages` for Claude (claude-opus-5-5), whose own API
 speaks nothing else. Both carry the model's reasoning across tool rounds, as
 encrypted items and as signed thinking blocks. A tool loop appends
 `resp.Assistant()`, never a turn rebuilt from `Content` and `ToolCalls`, so

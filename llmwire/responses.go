@@ -16,7 +16,10 @@ import (
 // differently. Every wire fact below was MEASURED on gpt-6.1-sol through
 // LiteLLM 1.105.1 → Azure Switzerland North (`gpt-6.1-sol-2026-09-29`,
 // upstream `/openai/v1/responses?api-version=preview`), 2026-10-19, unless it
-// says otherwise.
+// says otherwise. gpt-6.2-sol on api.openai.com directly, 2026-11-20
+// (eval_responses_test.go), agreed on every point it reached: the stateless
+// replay accepted, each tool_choice honoured, a native stream (first data
+// 0.58s of 1.51s, usage on response.completed).
 //
 // STATELESS, ALWAYS
 //
