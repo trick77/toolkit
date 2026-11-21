@@ -11,8 +11,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +35,9 @@ const (
 	// binary files, each their own: a client taking several kinds in one reply sizes its cap to their sum, with
 	// images and binary files at 4/3 (base64).
 	maxFilesBytes = 3 << 20
+	// maxStructuredBytes bounds one result's Structured values together, encoded: a status list, not a payload.
+	// It keeps a reply with full image and file budgets under the client's 4 MiB cap.
+	maxStructuredBytes = 64 << 10
 )
 
 // Server describes one MCP endpoint. Zero values are the defaults noted per field.
@@ -149,13 +154,16 @@ type Image struct {
 
 // Result is what a tool produced. Sources[i] belongs to the text's item i+1; nil Sources sends no
 // structuredContent.sources, a non-nil empty slice an empty list. Files follow the text as embedded resources,
-// images follow the files as image blocks.
+// images follow the files as image blocks. Structured adds keys of the client's convention to
+// structuredContent (a status list, at most 64 KiB encoded); "sources" and "images" stay the library's in any
+// case and are dropped from it.
 type Result struct {
-	Text    string
-	Sources []Source
-	Files   []File
-	Images  []Image
-	IsError bool
+	Text       string
+	Sources    []Source
+	Files      []File
+	Images     []Image
+	Structured map[string]any
+	IsError    bool
 }
 
 // ErrorResult is a failed call the model reads and explains.
@@ -359,6 +367,8 @@ func (h *handler) callTool(w http.ResponseWriter, r *http.Request, req request, 
 	files, dropped, blobBytes := h.fileContent(res.Files)
 	images, metas, droppedImages, imageBytes := h.imageContent(p.Name, res.Images)
 	dropped = append(dropped, droppedImages...)
+	structured, droppedStructured := h.structuredContent(p.Name, res.Structured)
+	dropped = append(dropped, droppedStructured...)
 	slog.Info("mcp tool call", "server", h.s.Name, "tool", p.Name, "is_error", res.IsError,
 		"ms", time.Since(start).Milliseconds(), "files", len(files), "blob_bytes", blobBytes,
 		"images", len(images), "image_bytes", imageBytes, "not_attached", len(dropped))
@@ -374,7 +384,6 @@ func (h *handler) callTool(w http.ResponseWriter, r *http.Request, req request, 
 	// Order is part of the shape: text, then files in Result.Files order (each a text or a blob resource), then
 	// images (structuredContent.images[i] is the i-th image).
 	content := append(append([]map[string]any{{"type": "text", "text": text}}, files...), images...)
-	structured := map[string]any{}
 	if res.Sources != nil {
 		structured["sources"] = res.Sources
 	}
@@ -422,6 +431,34 @@ func (h *handler) imageContent(tool string, imgs []Image) (blocks, metas []map[s
 		metas = append(metas, meta)
 	}
 	return blocks, metas, dropped, used
+}
+
+// structuredContent is the Structured keys that go out, in key order while they fit maxStructuredBytes together.
+// "sources" and "images" stay the library's in any case (clients match JSON keys case-insensitively); a value
+// that does not encode (NaN, a func) would lose the whole reply after its 200. Each one left out is named for
+// the text, a reserved key only logged: it is the tool's mistake, not the model's business.
+func (h *handler) structuredContent(tool string, in map[string]any) (out map[string]any, dropped []string) {
+	out = map[string]any{}
+	used := 0
+	for _, k := range slices.Sorted(maps.Keys(in)) {
+		if strings.EqualFold(k, "sources") || strings.EqualFold(k, "images") {
+			slog.Warn("mcp structured key reserved, dropped", "server", h.s.Name, "tool", tool, "key", k)
+			continue
+		}
+		encoded, err := json.Marshal(in[k])
+		if err != nil {
+			slog.Warn("mcp structured value not encodable, dropped", "server", h.s.Name, "tool", tool, "key", k, "err", err)
+			dropped = append(dropped, "structured "+k+" (not encodable)")
+			continue
+		}
+		if used+len(encoded) > maxStructuredBytes {
+			dropped = append(dropped, "structured "+k+" (too large)")
+			continue
+		}
+		used += len(encoded)
+		out[k] = json.RawMessage(encoded)
+	}
+	return out, dropped
 }
 
 // fileContent turns files into embedded resources, in order: text files while they fit maxFilesBytes together,
