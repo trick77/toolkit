@@ -400,6 +400,62 @@ func TestHandler_imagesAsContentWithMeta(t *testing.T) {
 	}
 }
 
+// Structured keys go out in structuredContent next to sources and images;
+// those two stay the library's, a Structured key of that name is dropped.
+func TestHandler_structuredKeys(t *testing.T) {
+	h := New(Server{Name: "t", Tools: []Tool{{
+		Name: "add",
+		Run: func(context.Context, json.RawMessage) Result {
+			return Result{Text: "added", Sources: []Source{}, Structured: map[string]any{
+				"items":   []map[string]any{{"status": "done"}},
+				"sources": "shadowed",
+			}}
+		},
+	}}})
+	_, r, _ := call(t, h, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add"}}`, nil)
+	structured, _ := r.Result["structuredContent"].(map[string]any)
+	items, _ := structured["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["status"] != "done" {
+		t.Errorf("items = %+v", structured["items"])
+	}
+	if sources, ok := structured["sources"].([]any); !ok || len(sources) != 0 {
+		t.Errorf("sources = %+v, want the library's empty list", structured["sources"])
+	}
+}
+
+// Reserved keys are dropped in any case (clients decode JSON keys case-insensitively), a value that does not
+// encode or does not fit the budget is left out and named in the text, the rest still goes out, and Structured
+// alone makes a structuredContent on the modern path too.
+func TestHandler_structuredDropsWhatCannotGo(t *testing.T) {
+	h := New(Server{Name: "t", Tools: []Tool{{
+		Name: "add",
+		Run: func(context.Context, json.RawMessage) Result {
+			return Result{Text: "added", Structured: map[string]any{
+				"Sources": []string{"x"},
+				"IMAGES":  1,
+				"bad":     math.NaN(),
+				"huge":    strings.Repeat("z", maxStructuredBytes),
+				"items":   []string{"ok"},
+			}}
+		},
+	}}})
+	for _, modern := range []bool{false, true} {
+		body, headers := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add"}}`, map[string]string(nil)
+		if modern {
+			body, headers = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{`+meta+`,"name":"add"}}`, modernHeaders("tools/call", "add")
+		}
+		_, r, _ := call(t, h, body, headers)
+		structured, _ := r.Result["structuredContent"].(map[string]any)
+		if len(structured) != 1 || structured["items"] == nil {
+			t.Errorf("modern=%v structuredContent = %+v, want only items", modern, structured)
+		}
+		text := toolText(t, r)
+		if !strings.Contains(text, "structured bad (not encodable)") || !strings.Contains(text, "structured huge (too large)") {
+			t.Errorf("modern=%v text = %q, want the dropped keys named", modern, text)
+		}
+	}
+}
+
 // A file with Data goes out as a blob resource, standard base64, no text.
 func TestHandler_binaryFileAsBlobResource(t *testing.T) {
 	data := []byte("%PDF-1.7\n\x00\xff\xfe binary")
