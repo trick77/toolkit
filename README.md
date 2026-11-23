@@ -82,6 +82,8 @@ if set.Feed != nil {
 // With a feed: stakeout.Recorder outside the access log, stakeout.RecordRoute(mux, "GET /") around the mux,
 // and in the access log's per-request hook feed.Enqueue(stakeout.EventFrom(r, clientIP, status, dur)).
 // A handler that knows the account: stakeout.SetAccount(r.Context(), opaqueID).
+// One route serving several things (an MCP tool), a failure answered 200: stakeout.SetOp and stakeout.SetError, names
+// from fixed lists of the app. What mcpserver refuses itself (an unknown tool) reaches neither.
 ```
 
 The emitter never blocks a request: a full queue drops. A batch that failed on the way (network, 408, 429, 5xx) is

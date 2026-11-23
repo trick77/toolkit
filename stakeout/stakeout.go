@@ -154,6 +154,8 @@ type Event struct {
 	CHUA     string `json:"ch_ua"`
 	SigAgent string `json:"sig_agent"` // Signature-Agent (Web Bot Auth), as sent
 	Account  string `json:"account"`   // an opaque account id, never an email or a name; "" for none
+	Op       string `json:"op"`        // what the request did inside its route (an MCP tool); "" where the route says it
+	Err      string `json:"err"`       // why it failed where the status does not say so; "" for none
 }
 
 // Stakeout's per-field limits, in bytes of the value it decodes. Stakeout cuts a longer value, but the emitter cuts
@@ -162,6 +164,7 @@ const (
 	maxMethod   = 16
 	maxRoute    = 200
 	maxSF       = 32 // each Sec-Fetch value
+	maxName     = 64 // op, err
 	maxSigAgent = 256
 	maxAcct     = 128
 	maxHeader   = 512 // ua, lang, ch_ua
@@ -196,6 +199,7 @@ func (ev Event) sanitized() (Event, bool) {
 	ev.SFSite, ev.SFMode, ev.SFDest = clip(ev.SFSite, maxSF), clip(ev.SFMode, maxSF), clip(ev.SFDest, maxSF)
 	ev.SigAgent = clip(ev.SigAgent, maxSigAgent)
 	ev.Account = clip(ev.Account, maxAcct)
+	ev.Op, ev.Err = clip(ev.Op, maxName), clip(ev.Err, maxName)
 	ev.UA, ev.Lang, ev.CHUA = clip(ev.UA, maxHeader), clip(ev.Lang, maxHeader), clip(ev.CHUA, maxHeader)
 	ev.Path, ev.Ref = clip(ev.Path, maxURL), clip(ev.Ref, maxURL)
 	return ev, true

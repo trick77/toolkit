@@ -113,6 +113,9 @@ func TestFeedEventFields(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/as/{asn}", func(w http.ResponseWriter, r *http.Request) {
 		SetAccount(r.Context(), "acc_8f3a")
+		SetError(r.Context(), "upstream_error")
+		SetOp(r.Context(), "whois")
+		SetError(r.Context(), "invalid_params")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, "hello")
 	})
@@ -140,7 +143,7 @@ func TestFeedEventFields(t *testing.T) {
 	want := Event{T: ev.T, IP: "203.0.113.42", UA: "Mozilla/5.0 test", Method: "GET", Path: "/api/v1/as/15169",
 		Route: "GET /api/v1/as/{asn}", Status: 201, DurMS: ev.DurMS, Bytes: 5, Ref: "https://search.example/results",
 		Lang: "de-CH", SFSite: "none", SFMode: "navigate", SFDest: "document", CHUA: `"Chromium";v="130"`,
-		SigAgent: `"https://chatgpt.com"`, Account: "acc_8f3a"}
+		SigAgent: `"https://chatgpt.com"`, Account: "acc_8f3a", Op: "whois", Err: "invalid_params"}
 	if ev != want {
 		t.Errorf("event\n got %+v\nwant %+v", ev, want)
 	}
@@ -194,14 +197,18 @@ func TestFeedEventNoRoute(t *testing.T) {
 	}
 }
 
-// Without Recorder outside, SetAccount and RecordRoute do nothing and EventFrom still maps the request.
+// Without Recorder outside, SetAccount, SetOp, SetError and RecordRoute do nothing and EventFrom still maps the request.
 func TestFeedWithoutRecorder(t *testing.T) {
 	feed := &fakeFeed{}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /x", func(_ http.ResponseWriter, r *http.Request) { SetAccount(r.Context(), "acc") })
+	mux.HandleFunc("GET /x", func(_ http.ResponseWriter, r *http.Request) {
+		SetAccount(r.Context(), "acc")
+		SetOp(r.Context(), "op")
+		SetError(r.Context(), "code")
+	})
 	accessLog(feed, RecordRoute(mux)).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/x", nil))
-	if ev := feed.one(t); ev.Route != "" || ev.Account != "" || ev.Path != "/x" {
-		t.Errorf("event %+v, want no route, no account, path /x", ev)
+	if ev := feed.one(t); ev.Route != "" || ev.Account != "" || ev.Op != "" || ev.Err != "" || ev.Path != "/x" {
+		t.Errorf("event %+v, want no route, no account, no op, no err, path /x", ev)
 	}
 }
 
