@@ -19,9 +19,12 @@ const (
 	maxBatch = 500       // events per request, Stakeout's limit
 	maxBody  = 256 << 10 // request body bytes, Stakeout's limit
 
-	bufferSize    = 4096             // events queued (a few KiB each at most); a full queue drops, never blocks a request
-	flushInterval = 5 * time.Second  // a partial batch waits at most this long
-	sendTimeout   = 5 * time.Second  // one POST, connect to last byte
+	bufferSize    = 4096            // events queued (a few KiB each at most); a full queue drops, never blocks a request
+	flushInterval = 5 * time.Second // a partial batch waits at most this long
+	// sendTimeout is one POST, connect to last byte: the contract's 30 s, Stakeout's own body timeout. Shorter, a
+	// batch Stakeout is still committing times out and goes again, and Stakeout keeps both copies (no dedup).
+	// Meanwhile the queue takes what arrives; Shutdown's context bounds the last send, not this.
+	sendTimeout   = 30 * time.Second
 	backoffMin    = 5 * time.Second  // first pause after a failed send, doubling per failure
 	backoffMax    = 5 * time.Minute  // longest pause, Retry-After included
 	statsInterval = 10 * time.Minute // the counters' log line
