@@ -130,8 +130,8 @@ func TestClip(t *testing.T) {
 }
 
 // Stakeout's limits per field, in bytes of the decoded value: one field past its limit gets the whole batch refused.
-var fieldLimits = map[string]int{"method": 16, "route": 200, "sf_site": 32, "sf_mode": 32, "sf_dest": 32,
-	"account": 128, "ua": 512, "lang": 512, "ch_ua": 512, "path": 2048, "ref": 2048}
+var fieldLimits = map[string]int{"method": 16, "route": 200, "sig_agent": 256, "sf_site": 32, "sf_mode": 32, "sf_dest": 32,
+	"account": 128, "op": 64, "err": 64, "ua": 512, "lang": 512, "ch_ua": 512, "path": 2048, "ref": 2048}
 
 // Whatever a client sends, every field arrives valid UTF-8 and within Stakeout's limit, measured on what Stakeout
 // decodes.
@@ -145,7 +145,7 @@ func TestSanitizedFieldLimits(t *testing.T) {
 		"alternating": strings.Repeat("\xffa", 1_100), // fits the path limit as sent, not after replacement
 	} {
 		ev, ok := Event{IP: "203.0.113.42", UA: junk, Method: junk, Path: junk, Route: junk, Ref: junk, Lang: junk,
-			SFSite: junk, SFMode: junk, SFDest: junk, CHUA: junk, Account: junk}.sanitized()
+			SFSite: junk, SFMode: junk, SFDest: junk, CHUA: junk, SigAgent: junk, Account: junk, Op: junk, Err: junk}.sanitized()
 		if !ok {
 			t.Fatalf("%s: refused", name)
 		}

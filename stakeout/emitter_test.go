@@ -127,7 +127,7 @@ func decode(t *testing.T, b []byte) body {
 
 // contractFields is Stakeout's field list: every event carries exactly these.
 var contractFields = []string{"t", "ip", "ua", "method", "path", "route", "status", "dur_ms", "bytes", "ref", "lang",
-	"sf_site", "sf_mode", "sf_dest", "ch_ua", "sig_agent", "account"}
+	"sf_site", "sf_mode", "sf_dest", "ch_ua", "sig_agent", "account", "op", "err"}
 
 func TestEmitterSendsTheContract(t *testing.T) {
 	f := &fakeStakeout{}
@@ -135,7 +135,7 @@ func TestEmitterSendsTheContract(t *testing.T) {
 	ev := Event{T: 1795338999000, IP: "203.0.113.42", UA: "Mozilla/5.0", Method: "GET", Path: "/AS15169",
 		Route: "GET /", Status: 200, DurMS: 12, Bytes: 5120, Ref: "https://example.com/", Lang: "de-CH",
 		SFSite: "none", SFMode: "navigate", SFDest: "document", CHUA: `"Chromium";v="130"`,
-		SigAgent: `"https://chatgpt.com"`, Account: "acc_8f3a"}
+		SigAgent: `"https://chatgpt.com"`, Account: "acc_8f3a", Op: "whois", Err: "invalid_params"}
 	e.Enqueue(ev)
 	shutdown(t, e)
 
@@ -169,7 +169,7 @@ func TestEmitterSendsTheContract(t *testing.T) {
 	}
 	for k, v := range map[string]any{"t": 1795338999000.0, "ip": "203.0.113.42", "path": "/AS15169", "route": "GET /",
 		"status": 200.0, "dur_ms": 12.0, "bytes": 5120.0, "lang": "de-CH", "sf_mode": "navigate",
-		"ch_ua": `"Chromium";v="130"`, "sig_agent": `"https://chatgpt.com"`, "account": "acc_8f3a"} {
+		"ch_ua": `"Chromium";v="130"`, "sig_agent": `"https://chatgpt.com"`, "account": "acc_8f3a", "op": "whois", "err": "invalid_params"} {
 		if got[k] != v {
 			t.Errorf("%s = %v, want %v", k, got[k], v)
 		}
@@ -228,7 +228,7 @@ func TestEmitterBatchesByBytes(t *testing.T) {
 func TestEmitterLimitsFitTheContract(t *testing.T) {
 	huge := strings.Repeat("\x01", 100_000) // a control character escapes to six bytes
 	ev, ok := Event{IP: testIP, UA: huge, Method: huge, Path: huge, Route: huge, Ref: huge, Lang: huge, SFSite: huge,
-		SFMode: huge, SFDest: huge, CHUA: huge, SigAgent: huge, Account: huge}.sanitized()
+		SFMode: huge, SFDest: huge, CHUA: huge, SigAgent: huge, Account: huge, Op: huge, Err: huge}.sanitized()
 	if !ok {
 		t.Fatal("sanitized refused a valid ip")
 	}
