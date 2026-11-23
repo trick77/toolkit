@@ -19,7 +19,7 @@ const (
 	FeedPath   = "/api/feed"
 )
 
-// Origin is raw (STAKEOUT_URL) reduced to scheme://host[:port], the one form that goes into the CSP header and the
+// Origin is raw (ANALYTICS_URL) reduced to scheme://host[:port], the one form that goes into the CSP header and the
 // script tag. Anything that could smuggle more into either (a path, a query, userinfo, whitespace) is refused, not
 // cleaned up, and so is any host but a DNS name or an IP literal: a CSP wildcard (https://*, https://*.example)
 // would allow scripts from hosts Stakeout does not own. The errors never echo raw: it may hold a password.
@@ -96,21 +96,21 @@ type Settings struct {
 	Feed   *Config // the server feed; nil is off
 }
 
-// Resolve reads STAKEOUT_URL (rawURL), STAKEOUT_FEED_KEY and STAKEOUT_SITE; defaultSite (the app's public host, ""
-// for none) names the site when STAKEOUT_SITE is unset. A URL alone turns on the tracker, a key adds the feed. A value
+// Resolve reads ANALYTICS_URL (rawURL), ANALYTICS_FEED_KEY and ANALYTICS_SITE; defaultSite (the app's public host, ""
+// for none) names the site when ANALYTICS_SITE is unset. A URL alone turns on the tracker, a key adds the feed. A value
 // that does not work turns the part it belongs to off and comes back as a warning: Stakeout is optional, it never
 // stops the app from starting.
 func Resolve(rawURL, key, site, defaultSite string) (Settings, []string) {
 	rawURL, key, site = strings.TrimSpace(rawURL), strings.TrimSpace(key), strings.TrimSpace(site)
 	if rawURL == "" {
 		if key != "" {
-			return Settings{}, []string{"STAKEOUT_FEED_KEY is set without STAKEOUT_URL: Stakeout off"}
+			return Settings{}, []string{"ANALYTICS_FEED_KEY is set without ANALYTICS_URL: Stakeout off"}
 		}
 		return Settings{}, nil
 	}
 	origin, err := Origin(rawURL)
 	if err != nil {
-		return Settings{}, []string{"STAKEOUT_URL: " + err.Error() + ": Stakeout off"}
+		return Settings{}, []string{"ANALYTICS_URL: " + err.Error() + ": Stakeout off"}
 	}
 	s := Settings{Origin: origin}
 	if key == "" {
@@ -122,12 +122,12 @@ func Resolve(rawURL, key, site, defaultSite string) (Settings, []string) {
 	var warns []string
 	switch {
 	case strings.ContainsFunc(key, func(r rune) bool { return r <= ' ' || r == 0x7f }):
-		warns = append(warns, "STAKEOUT_FEED_KEY holds whitespace or control characters: Stakeout feed off")
+		warns = append(warns, "ANALYTICS_FEED_KEY holds whitespace or control characters: Stakeout feed off")
 	case site == "":
-		warns = append(warns, "STAKEOUT_SITE is unset and the app has no public host to fall back on: Stakeout feed off")
+		warns = append(warns, "ANALYTICS_SITE is unset: Stakeout feed off")
 	default:
 		if strings.HasPrefix(origin, "http://") {
-			warns = append(warns, "STAKEOUT_URL is plain http: the feed key travels unencrypted")
+			warns = append(warns, "ANALYTICS_URL is plain http: the feed key travels unencrypted")
 		}
 		s.Feed = &Config{Endpoint: origin + FeedPath, Key: key, Site: site}
 	}
