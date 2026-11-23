@@ -64,15 +64,15 @@ Not covered: sessions, the GET stream, server-initiated requests, resources and 
 
 ## stakeout
 
-`STAKEOUT_URL` alone loads the tracker, `STAKEOUT_FEED_KEY` adds the feed, `STAKEOUT_SITE` names the site the key
+`ANALYTICS_URL` alone loads the tracker, `ANALYTICS_FEED_KEY` adds the feed, `ANALYTICS_SITE` names the site the key
 belongs to. All empty: the app runs as without Stakeout. A value that does not work turns its part off with a
 warning, never the app.
 
 ```go
 import "github.com/trick77/toolkit/stakeout"
 
-set, warns := stakeout.Resolve(os.Getenv("STAKEOUT_URL"), os.Getenv("STAKEOUT_FEED_KEY"),
-	os.Getenv("STAKEOUT_SITE"), publicHost)
+set, warns := stakeout.Resolve(os.Getenv("ANALYTICS_URL"), os.Getenv("ANALYTICS_FEED_KEY"),
+	os.Getenv("ANALYTICS_SITE"), "")
 // set.Origin: add it to script-src and connect-src, load set.Origin + stakeout.ScriptPath on every page.
 var feed *stakeout.Emitter
 if set.Feed != nil {

@@ -80,7 +80,7 @@ func TestResolve(t *testing.T) {
 			wantOrigin: "https://stakeout.example"},
 		{name: "URL and key: feed, site from PUBLIC_BASE_URL", url: "https://stakeout.example", key: "k",
 			def: "lens.ipverse.net", wantOrigin: "https://stakeout.example", wantFeed: true, wantSite: "lens.ipverse.net"},
-		{name: "STAKEOUT_SITE wins", url: "https://stakeout.example", key: "k", site: "other.example", def: "lens.ipverse.net",
+		{name: "ANALYTICS_SITE wins", url: "https://stakeout.example", key: "k", site: "other.example", def: "lens.ipverse.net",
 			wantOrigin: "https://stakeout.example", wantFeed: true, wantSite: "other.example"},
 		{name: "no site at all: tracker only, warned", url: "https://stakeout.example", key: "k",
 			wantOrigin: "https://stakeout.example", wantWarn: true},
