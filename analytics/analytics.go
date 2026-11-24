@@ -1,8 +1,8 @@
-// Package stakeout connects an app to Stakeout (github.com/trick77/stakeout), the self-hosted usage analytics: the
-// origin the app's pages load Stakeout's tracker from, and the feed that reports every request the app serves, so
-// clients that never run JavaScript (crawlers, probes, API scripts) show up too. The contract is Stakeout's
-// INTEGRATION.md. Stakeout is optional: down, slow or misconfigured, it never touches a request.
-package stakeout
+// Package analytics connects an app to Trakk (github.com/trick77/trakk), the self-hosted web traffic observability: the
+// origin the app's pages load Trakk's tracker from, and the feed that reports every request the app serves, so
+// clients that never run JavaScript (crawlers, probes, API scripts) show up too. The contract is Trakk's
+// INTEGRATION.md. Trakk is optional: down, slow or misconfigured, it never touches a request.
+package analytics
 
 import (
 	"errors"
@@ -13,16 +13,16 @@ import (
 	"unicode/utf8"
 )
 
-// The paths Stakeout serves, fixed by its contract.
+// The paths Trakk serves, fixed by its contract.
 const (
-	ScriptPath = "/stakeout.js"
+	ScriptPath = "/trakk.js"
 	FeedPath   = "/api/feed"
 )
 
 // Origin is raw (ANALYTICS_URL) reduced to scheme://host[:port], the one form that goes into the CSP header and the
 // script tag. Anything that could smuggle more into either (a path, a query, userinfo, whitespace) is refused, not
 // cleaned up, and so is any host but a DNS name or an IP literal: a CSP wildcard (https://*, https://*.example)
-// would allow scripts from hosts Stakeout does not own. The errors never echo raw: it may hold a password.
+// would allow scripts from hosts Trakk does not own. The errors never echo raw: it may hold a password.
 func Origin(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -89,28 +89,28 @@ func originHost(hostport, name string) (string, bool) {
 	return name, true
 }
 
-// Settings is what the configuration turns on. The zero value is Stakeout off: no script tag, the app's own CSP, no
+// Settings is what the configuration turns on. The zero value is Trakk off: no script tag, the app's own CSP, no
 // feed.
 type Settings struct {
-	Origin string  // Stakeout's origin: the tracker's script tag and the CSP; "" is off
+	Origin string  // Trakk's origin: the tracker's script tag and the CSP; "" is off
 	Feed   *Config // the server feed; nil is off
 }
 
 // Resolve reads ANALYTICS_URL (rawURL), ANALYTICS_FEED_KEY and ANALYTICS_SITE; defaultSite (the app's public host, ""
 // for none) names the site when ANALYTICS_SITE is unset. A URL alone turns on the tracker, a key adds the feed. A value
-// that does not work turns the part it belongs to off and comes back as a warning: Stakeout is optional, it never
+// that does not work turns the part it belongs to off and comes back as a warning: Trakk is optional, it never
 // stops the app from starting.
 func Resolve(rawURL, key, site, defaultSite string) (Settings, []string) {
 	rawURL, key, site = strings.TrimSpace(rawURL), strings.TrimSpace(key), strings.TrimSpace(site)
 	if rawURL == "" {
 		if key != "" {
-			return Settings{}, []string{"ANALYTICS_FEED_KEY is set without ANALYTICS_URL: Stakeout off"}
+			return Settings{}, []string{"ANALYTICS_FEED_KEY is set without ANALYTICS_URL: Trakk off"}
 		}
 		return Settings{}, nil
 	}
 	origin, err := Origin(rawURL)
 	if err != nil {
-		return Settings{}, []string{"ANALYTICS_URL: " + err.Error() + ": Stakeout off"}
+		return Settings{}, []string{"ANALYTICS_URL: " + err.Error() + ": Trakk off"}
 	}
 	s := Settings{Origin: origin}
 	if key == "" {
@@ -122,9 +122,9 @@ func Resolve(rawURL, key, site, defaultSite string) (Settings, []string) {
 	var warns []string
 	switch {
 	case strings.ContainsFunc(key, func(r rune) bool { return r <= ' ' || r == 0x7f }):
-		warns = append(warns, "ANALYTICS_FEED_KEY holds whitespace or control characters: Stakeout feed off")
+		warns = append(warns, "ANALYTICS_FEED_KEY holds whitespace or control characters: Trakk feed off")
 	case site == "":
-		warns = append(warns, "ANALYTICS_SITE is unset: Stakeout feed off")
+		warns = append(warns, "ANALYTICS_SITE is unset: Trakk feed off")
 	default:
 		if strings.HasPrefix(origin, "http://") {
 			warns = append(warns, "ANALYTICS_URL is plain http: the feed key travels unencrypted")
@@ -134,7 +134,7 @@ func Resolve(rawURL, key, site, defaultSite string) (Settings, []string) {
 	return s, warns
 }
 
-// Event is one served request, exactly the fields Stakeout's feed takes and nothing else: no raw header, query string,
+// Event is one served request, exactly the fields Trakk's feed takes and nothing else: no raw header, query string,
 // cookie or body leaves the app.
 type Event struct {
 	T        int64  `json:"t"` // request start, epoch milliseconds
@@ -158,7 +158,7 @@ type Event struct {
 	Err      string `json:"err"`       // why it failed where the status does not say so; "" for none
 }
 
-// Stakeout's per-field limits, in bytes of the value it decodes. Stakeout cuts a longer value, but the emitter cuts
+// Trakk's per-field limits, in bytes of the value it decodes. Trakk cuts a longer value, but the emitter cuts
 // first: the values come from the client (a header can be up to net/http's 1 MB), and they sit in the queue.
 const (
 	maxMethod   = 16
@@ -187,7 +187,7 @@ func clip(s string, limit int) string {
 }
 
 // sanitized is ev as it may be sent: every string within its field's limit and copied, the ip in canonical form.
-// ok is false when ip is no address: Stakeout refuses that event, and with it the batch.
+// ok is false when ip is no address: Trakk drops that event.
 func (ev Event) sanitized() (Event, bool) {
 	a, err := netip.ParseAddr(ev.IP)
 	if err != nil {

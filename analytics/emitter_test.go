@@ -1,4 +1,4 @@
-package stakeout
+package analytics
 
 import (
 	"bytes"
@@ -17,8 +17,8 @@ import (
 	"time"
 )
 
-// fakeStakeout is Stakeout's feed endpoint as a RoundTripper: it records every request and answers with respond.
-type fakeStakeout struct {
+// fakeCollector is Trakk's feed endpoint as a RoundTripper: it records every request and answers with respond.
+type fakeCollector struct {
 	mu      sync.Mutex
 	reqs    []captured
 	respond func(n int, r *http.Request) (*http.Response, error) // n counts from 0; nil answers 204
@@ -30,7 +30,7 @@ type captured struct {
 	body        []byte
 }
 
-func (f *fakeStakeout) RoundTrip(r *http.Request) (*http.Response, error) {
+func (f *fakeCollector) RoundTrip(r *http.Request) (*http.Response, error) {
 	body, _ := io.ReadAll(r.Body)
 	f.mu.Lock()
 	n := len(f.reqs)
@@ -43,7 +43,7 @@ func (f *fakeStakeout) RoundTrip(r *http.Request) (*http.Response, error) {
 	return respond(n, r)
 }
 
-func (f *fakeStakeout) requests() []captured {
+func (f *fakeCollector) requests() []captured {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.reqs)
@@ -74,7 +74,7 @@ func (c *clock) add(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-var testCfg = Config{Endpoint: "https://stakeout.example/api/feed", Key: "feed-key-123", Site: "lens.ipverse.net"}
+var testCfg = Config{Endpoint: "https://analytics.example/api/feed", Key: "feed-key-123", Site: "lens.ipverse.net"}
 
 const testIP = "192.0.2.1"
 
@@ -85,7 +85,7 @@ func testTuning() tuning {
 	return t
 }
 
-func startTest(t *testing.T, tun tuning, f *fakeStakeout) *Emitter {
+func startTest(t *testing.T, tun tuning, f *fakeCollector) *Emitter {
 	t.Helper()
 	e := start(testCfg, slog.New(slog.DiscardHandler), tun, f)
 	t.Cleanup(func() { _ = e.Shutdown(context.Background()) })
@@ -125,12 +125,12 @@ func decode(t *testing.T, b []byte) body {
 	return out
 }
 
-// contractFields is Stakeout's field list: every event carries exactly these.
+// contractFields is Trakk's field list: every event carries exactly these.
 var contractFields = []string{"t", "ip", "ua", "method", "path", "route", "status", "dur_ms", "bytes", "ref", "lang",
 	"sf_site", "sf_mode", "sf_dest", "ch_ua", "sig_agent", "account", "op", "err"}
 
 func TestEmitterSendsTheContract(t *testing.T) {
-	f := &fakeStakeout{}
+	f := &fakeCollector{}
 	e := startTest(t, testTuning(), f)
 	ev := Event{T: 1795338999000, IP: "203.0.113.42", UA: "Mozilla/5.0", Method: "GET", Path: "/AS15169",
 		Route: "GET /", Status: 200, DurMS: 12, Bytes: 5120, Ref: "https://example.com/", Lang: "de-CH",
@@ -181,7 +181,7 @@ func TestEmitterSendsTheContract(t *testing.T) {
 
 // A batch goes out when it is full, the rest on shutdown.
 func TestEmitterBatchesByCount(t *testing.T) {
-	f := &fakeStakeout{}
+	f := &fakeCollector{}
 	tun := testTuning()
 	tun.maxBatch = 3
 	e := startTest(t, tun, f)
@@ -204,7 +204,7 @@ func TestEmitterBatchesByCount(t *testing.T) {
 
 // No body exceeds the byte limit, however the events add up; none is lost to the split.
 func TestEmitterBatchesByBytes(t *testing.T) {
-	f := &fakeStakeout{}
+	f := &fakeCollector{}
 	tun := testTuning()
 	tun.maxBody = 2048
 	e := startTest(t, tun, f)
@@ -240,13 +240,13 @@ func TestEmitterLimitsFitTheContract(t *testing.T) {
 		t.Errorf("largest event %d bytes, want far below the %d body limit", len(b), maxBody)
 	}
 	if maxBatch > 500 || maxBody > 256<<10 {
-		t.Errorf("limits %d events / %d bytes exceed Stakeout's 500 / 256 KiB", maxBatch, maxBody)
+		t.Errorf("limits %d events / %d bytes exceed Trakk's 500 / 256 KiB", maxBatch, maxBody)
 	}
 }
 
 // A timer sends a partial batch.
 func TestEmitterFlushesOnTimer(t *testing.T) {
-	f := &fakeStakeout{}
+	f := &fakeCollector{}
 	tun := testTuning()
 	tun.flushInterval = 10 * time.Millisecond
 	e := startTest(t, tun, f)
@@ -260,7 +260,7 @@ func TestEmitterFlushesOnTimer(t *testing.T) {
 // Enqueue never blocks: with the sender stuck in a send, a full queue drops and counts.
 func TestEmitterDropsWhenFull(t *testing.T) {
 	release := make(chan struct{})
-	f := &fakeStakeout{respond: func(_ int, r *http.Request) (*http.Response, error) {
+	f := &fakeCollector{respond: func(_ int, r *http.Request) (*http.Response, error) {
 		select {
 		case <-release:
 		case <-r.Context().Done():
@@ -321,7 +321,7 @@ func paths(t *testing.T, reqs []captured) [][]string {
 // past a full one is dropped.
 func TestEmitterRetriesAfter429(t *testing.T) {
 	c := &clock{t: time.Unix(1_800_000_000, 0)}
-	f := &fakeStakeout{respond: func(n int, _ *http.Request) (*http.Response, error) {
+	f := &fakeCollector{respond: func(n int, _ *http.Request) (*http.Response, error) {
 		if n == 0 {
 			return answer(http.StatusTooManyRequests, http.Header{"Retry-After": {"30"}}), nil
 		}
@@ -377,7 +377,7 @@ func TestEmitterRetriesOnFailure(t *testing.T) {
 			c := &clock{t: time.Unix(1_800_000_000, 0)}
 			var mu sync.Mutex
 			fail := true
-			f := &fakeStakeout{respond: func(n int, r *http.Request) (*http.Response, error) {
+			f := &fakeCollector{respond: func(n int, r *http.Request) (*http.Response, error) {
 				mu.Lock()
 				defer mu.Unlock()
 				if fail {
@@ -420,7 +420,7 @@ func TestEmitterRetriesOnFailure(t *testing.T) {
 // A held batch is given up once its retry window has passed.
 func TestEmitterRetryWindow(t *testing.T) {
 	c := &clock{t: time.Unix(1_800_000_000, 0)}
-	f := &fakeStakeout{respond: func(int, *http.Request) (*http.Response, error) {
+	f := &fakeCollector{respond: func(int, *http.Request) (*http.Response, error) {
 		return answer(http.StatusServiceUnavailable, nil), nil
 	}}
 	tun := testTuning()
@@ -441,7 +441,7 @@ func TestEmitterRetryWindow(t *testing.T) {
 	waitFor(t, "the give-up", func() bool { return e.Stats().Failed == 1 })
 }
 
-// 401 and a redirect mean Stakeout refuses the feed: the batch is dropped, never sent again, and the feed pauses,
+// 401 and a redirect mean Trakk refuses the feed: the batch is dropped, never sent again, and the feed pauses,
 // doubling; a success ends it.
 func TestEmitterDropsRefusedFeed(t *testing.T) {
 	for _, tc := range []struct {
@@ -457,7 +457,7 @@ func TestEmitterDropsRefusedFeed(t *testing.T) {
 			c := &clock{t: time.Unix(1_800_000_000, 0)}
 			var mu sync.Mutex
 			fail := true
-			f := &fakeStakeout{respond: func(n int, r *http.Request) (*http.Response, error) {
+			f := &fakeCollector{respond: func(n int, r *http.Request) (*http.Response, error) {
 				mu.Lock()
 				defer mu.Unlock()
 				if fail {
@@ -497,7 +497,7 @@ func TestEmitterDropsRefusedFeed(t *testing.T) {
 
 // A refused batch (400, 413) is that batch's fault: dropped, no pause.
 func TestEmitterNoPauseOnBadBatch(t *testing.T) {
-	f := &fakeStakeout{respond: func(n int, _ *http.Request) (*http.Response, error) {
+	f := &fakeCollector{respond: func(n int, _ *http.Request) (*http.Response, error) {
 		if n == 0 {
 			return answer(http.StatusRequestEntityTooLarge, nil), nil
 		}
@@ -558,7 +558,7 @@ func TestParseRetryAfter(t *testing.T) {
 // Shutdown sends what is queued, even with the timer far off, and stops the sender: no goroutine outlives it.
 func TestEmitterShutdownFlushesAndLeavesNoGoroutine(t *testing.T) {
 	before := runtime.NumGoroutine()
-	f := &fakeStakeout{}
+	f := &fakeCollector{}
 	e := start(testCfg, slog.New(slog.DiscardHandler), testTuning(), f)
 	e.Enqueue(Event{IP: testIP, Path: "/a"})
 	e.Enqueue(Event{IP: testIP, Path: "/b"})
@@ -583,7 +583,7 @@ func TestEmitterShutdownFlushesAndLeavesNoGoroutine(t *testing.T) {
 
 // A shutdown deadline cuts the send in flight; Shutdown still returns only after the sender is gone.
 func TestEmitterShutdownDeadline(t *testing.T) {
-	f := &fakeStakeout{respond: func(_ int, r *http.Request) (*http.Response, error) {
+	f := &fakeCollector{respond: func(_ int, r *http.Request) (*http.Response, error) {
 		<-r.Context().Done()
 		return nil, r.Context().Err()
 	}}
@@ -615,10 +615,10 @@ func TestNilEmitterTakesNothing(*testing.T) {
 	e.Enqueue(Event{}) // no panic
 }
 
-// The counters reach the log; the key never does, not even when Stakeout refuses it.
+// The counters reach the log; the key never does, not even when Trakk refuses it.
 func TestEmitterLogs(t *testing.T) {
 	var buf safeBuffer
-	f := &fakeStakeout{respond: func(n int, _ *http.Request) (*http.Response, error) {
+	f := &fakeCollector{respond: func(n int, _ *http.Request) (*http.Response, error) {
 		if n == 0 {
 			return answer(http.StatusUnauthorized, nil), nil
 		}
@@ -634,8 +634,8 @@ func TestEmitterLogs(t *testing.T) {
 	waitFor(t, "the recovery", func() bool { return e.Stats().Sent == 1 })
 	shutdown(t, e)
 	out := buf.String()
-	for _, want := range []string{"stakeout feed send failed", "status 401", "stakeout feed recovered",
-		"stakeout feed stopped", "sent=1", "failed=1"} {
+	for _, want := range []string{"analytics feed send failed", "status 401", "analytics feed recovered",
+		"analytics feed stopped", "sent=1", "failed=1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %q:\n%s", want, out)
 		}

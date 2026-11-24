@@ -14,10 +14,10 @@ One module, one version line. v0.x: a minor release may break callers, its relea
 
 | Package | What |
 |---|---|
+| [`analytics`](analytics) | An app's side of [Trakk](https://github.com/trick77/trakk)'s integration: the tracker's origin for the script tag and the CSP, and the server feed (middleware that records each request, a non-blocking emitter that batches them to `/api/feed`). |
 | [`applemusic`](applemusic) | Apple Music API the way the music.apple.com web player reads it: the player's developer token (scraped from its bundle), the user's media-user-token for library calls. Catalog (songs by ISRC, search, album tracks) and the user's library, history and recommendations. Read-only, unofficial. |
 | [`llmwire`](llmwire) | OpenAI-compatible inference (and Claude over Anthropic's protocol): chat, tools, vision, embeddings, each model's quirks kept as data in `profiles.yaml`. See [its README](llmwire/README.md). Was `github.com/trick77/llmwire`. |
 | [`mcpserver`](mcpserver) | Stateless [MCP](https://modelcontextprotocol.io) server over streamable HTTP, JSON responses only. Answers the 2026-07-28 revision and the initialize-era ones (2025-11-25, 2025-06-18, 2025-03-26). |
-| [`stakeout`](stakeout) | An app's side of [Stakeout](https://github.com/trick77/stakeout)'s integration: the tracker's origin for the script tag and the CSP, and the server feed (middleware that records each request, a non-blocking emitter that batches them to `/api/feed`). |
 | [`webfetch`](webfetch) | In-process Go port of the reference `mcp-server-fetch`: fetch a URL, extract the main content as Markdown, honour robots.txt, SSRF-guarded. See [its README](webfetch/README.md). Was `github.com/trick77/webfetch`. |
 
 ## mcpserver
@@ -62,33 +62,33 @@ What `Server` covers beyond the tools:
 
 Not covered: sessions, the GET stream, server-initiated requests, resources and prompts. Tools only, stateless.
 
-## stakeout
+## analytics
 
 `ANALYTICS_URL` alone loads the tracker, `ANALYTICS_FEED_KEY` adds the feed, `ANALYTICS_SITE` names the site the key
-belongs to. All empty: the app runs as without Stakeout. A value that does not work turns its part off with a
+belongs to. All empty: the app runs as without Trakk. A value that does not work turns its part off with a
 warning, never the app.
 
 ```go
-import "github.com/trick77/toolkit/stakeout"
+import "github.com/trick77/toolkit/analytics"
 
-set, warns := stakeout.Resolve(os.Getenv("ANALYTICS_URL"), os.Getenv("ANALYTICS_FEED_KEY"),
+set, warns := analytics.Resolve(os.Getenv("ANALYTICS_URL"), os.Getenv("ANALYTICS_FEED_KEY"),
 	os.Getenv("ANALYTICS_SITE"), "")
-// set.Origin: add it to script-src and connect-src, load set.Origin + stakeout.ScriptPath on every page.
-var feed *stakeout.Emitter
+// set.Origin: add it to script-src and connect-src, load set.Origin + analytics.ScriptPath on every page.
+var feed *analytics.Emitter
 if set.Feed != nil {
-	feed = stakeout.Start(*set.Feed, nil)
+	feed = analytics.Start(*set.Feed, nil)
 	defer feed.Shutdown(ctx) // after the server drained: sends what is queued
 }
-// With a feed: stakeout.Recorder outside the access log, stakeout.RecordRoute(mux, "GET /") around the mux,
-// and in the access log's per-request hook feed.Enqueue(stakeout.EventFrom(r, clientIP, status, dur)).
-// A handler that knows the account: stakeout.SetAccount(r.Context(), opaqueID).
-// One route serving several things (an MCP tool), a failure answered 200: stakeout.SetOp and stakeout.SetError, names
+// With a feed: analytics.Recorder outside the access log, analytics.RecordRoute(mux, "GET /") around the mux,
+// and in the access log's per-request hook feed.Enqueue(analytics.EventFrom(r, clientIP, status, dur)).
+// A handler that knows the account: analytics.SetAccount(r.Context(), opaqueID).
+// One route serving several things (an MCP tool), a failure answered 200: analytics.SetOp and analytics.SetError, names
 // from fixed lists of the app. What mcpserver refuses itself (an unknown tool) reaches neither.
 ```
 
 The emitter never blocks a request: a full queue drops. A batch that failed on the way (network, 408, 429, 5xx) is
-sent again after `Retry-After` or a doubling back-off, for up to 45 minutes (Stakeout dates older events at receipt);
-one Stakeout refused (400, 401, 413, …) is dropped and logged.
+sent again after `Retry-After` or a doubling back-off, for up to 45 minutes (Trakk dates older events at receipt);
+one Trakk refused (400, 401, 413, …) is dropped and logged.
 
 ## Development
 
