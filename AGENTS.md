@@ -14,9 +14,10 @@
   `Server.UserHeader`; peeq's channel hint rides `InstructionsFunc`/`DescriptionFunc`).
 - analytics: named after the `ANALYTICS_*` settings it reads, never after the product (user: no import may change with
   a product's name). The contract is trick77/trakk's INTEGRATION.md; `Event` carries exactly its fields, never more (raw
-  headers carry cookies and credentials). Consumers: ipverse lens, lens-console, lens-gateway. Retry follows the
-  contract (lens' first emitter dropped failed batches; changed 2026-11-23). `retryWindow` < 1 h: Trakk files an
-  event over an hour old at the receive time.
+  headers carry cookies and credentials). Consumers: ipverse lens, lens-console, lens-gateway, ismimodown.
+  A 404 is retried: Traefik answers it while the collector's container is recreated, and each deploy of it lost every
+  app's batches. Another 4xx drops the batch: kept, one a firewall refuses for its probe paths blocks the feed. `maxAge` < 1 h: Trakk files an event over an hour old at
+  the receive time.
 
 ## Git & CI
 
