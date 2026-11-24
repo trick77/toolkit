@@ -1,4 +1,4 @@
-package stakeout
+package analytics
 
 import (
 	"encoding/json"

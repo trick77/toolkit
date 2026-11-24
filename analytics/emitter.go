@@ -1,4 +1,4 @@
-package stakeout
+package analytics
 
 import (
 	"bytes"
@@ -14,27 +14,27 @@ import (
 	"time"
 )
 
-// The feed's limits (Stakeout's contract) and the emitter's own.
+// The feed's limits (Trakk's contract) and the emitter's own.
 const (
-	maxBatch = 500       // events per request, Stakeout's limit
-	maxBody  = 256 << 10 // request body bytes, Stakeout's limit
+	maxBatch = 500       // events per request, Trakk's limit
+	maxBody  = 256 << 10 // request body bytes, Trakk's limit
 
 	bufferSize    = 4096            // events queued (a few KiB each at most); a full queue drops, never blocks a request
 	flushInterval = 5 * time.Second // a partial batch waits at most this long
-	// sendTimeout is one POST, connect to last byte: the contract's 30 s, Stakeout's own body timeout. Shorter, a
-	// batch Stakeout is still committing times out and goes again, and Stakeout keeps both copies (no dedup).
+	// sendTimeout is one POST, connect to last byte: the contract's 30 s, Trakk's own body timeout. Shorter, a
+	// batch Trakk is still committing times out and goes again, and Trakk keeps both copies (no dedup).
 	// Meanwhile the queue takes what arrives; Shutdown's context bounds the last send, not this.
 	sendTimeout   = 30 * time.Second
 	backoffMin    = 5 * time.Second  // first pause after a failed send, doubling per failure
 	backoffMax    = 5 * time.Minute  // longest pause, Retry-After included
 	statsInterval = 10 * time.Minute // the counters' log line
-	// retryWindow is how long a batch is offered again after its first failure. Stakeout files an event whose t is
+	// retryWindow is how long a batch is offered again after its first failure. Trakk files an event whose t is
 	// over an hour behind at the receive time instead, so an older batch would land at the wrong time: 45 minutes
 	// leaves room for the batch's own age (up to flushInterval) and the last send.
 	retryWindow = 45 * time.Minute
 )
 
-// Config says where the feed goes. Endpoint is Stakeout's origin + FeedPath.
+// Config says where the feed goes. Endpoint is Trakk's origin + FeedPath.
 type Config struct {
 	Endpoint string
 	Key      string
@@ -60,22 +60,22 @@ func defaults() tuning {
 
 // Stats are the emitter's counters since start, in events.
 type Stats struct {
-	Sent    uint64 // accepted by Stakeout (2xx), on the first send or a later one
+	Sent    uint64 // accepted by Trakk (2xx), on the first send or a later one
 	Dropped uint64 // never sent: queue full, during a back-off, after shutdown, or no valid ip
 	Failed  uint64 // sent and given up on: refused, or still failing when the retry window or shutdown ends it
 }
 
-// held is a batch that failed in a way Stakeout's contract says to send again (a network error, 408, 429, 5xx).
+// held is a batch that failed in a way Trakk's contract says to send again (a network error, 408, 429, 5xx).
 type held struct {
 	body  []byte
 	n     uint64
 	until time.Time // the end of its retry window
 }
 
-// Emitter batches events to Stakeout's feed from one background goroutine. Enqueue never blocks. A batch that
+// Emitter batches events to Trakk's feed from one background goroutine. Enqueue never blocks. A batch that
 // failed on the way (a network error, 408, 429, 5xx) is held and sent again after the pause (Retry-After, else a
-// doubling back-off) for up to retryWindow; one Stakeout refused (400, 401, 413, anything else) is dropped. While a
-// batch is held, one more batch fills behind it and what arrives past that is dropped: a struggling Stakeout gets
+// doubling back-off) for up to retryWindow; one Trakk refused (400, 401, 413, anything else) is dropped. While a
+// batch is held, one more batch fills behind it and what arrives past that is dropped: a struggling Trakk gets
 // the same traffic later, not more.
 type Emitter struct {
 	cfg    Config
@@ -140,8 +140,8 @@ func start(cfg Config, log *slog.Logger, tun tuning, transport http.RoundTripper
 	return e
 }
 
-// Enqueue hands ev to the sender without blocking: a full queue, a stopped emitter, or an event Stakeout would refuse
-// (an ip that is no address) drops it and counts the drop. What is queued is a sanitized copy: within Stakeout's field
+// Enqueue hands ev to the sender without blocking: a full queue, a stopped emitter, or an event Trakk would refuse
+// (an ip that is no address) drops it and counts the drop. What is queued is a sanitized copy: within Trakk's field
 // limits, sharing no memory with the request. A nil Emitter takes nothing.
 func (e *Emitter) Enqueue(ev Event) {
 	if e == nil {
@@ -234,7 +234,7 @@ func (e *Emitter) add(ev Event) {
 		return
 	}
 	envelope := len(e.prefix) + len("]}")
-	if envelope+len(b) > e.tun.maxBody { // the field limits keep an event far below it; never send one Stakeout refuses
+	if envelope+len(b) > e.tun.maxBody { // the field limits keep an event far below it; never send one Trakk refuses
 		e.dropped.Add(1)
 		return
 	}
@@ -259,7 +259,7 @@ func (e *Emitter) add(ev Event) {
 	}
 }
 
-// flush sends the held batch when its pause is over, then the pending one. A pause without a held batch (Stakeout
+// flush sends the held batch when its pause is over, then the pending one. A pause without a held batch (Trakk
 // refused the feed) drops the pending batch. final (shutdown) sends each once, pause or not, and holds nothing.
 func (e *Emitter) flush(final bool) {
 	if r := e.retry; r != nil {
@@ -308,7 +308,7 @@ func (e *Emitter) send(body []byte, n uint64, until time.Time, final bool) (ok b
 		e.backoff, e.resumeAt = 0, time.Time{}
 		if e.failing {
 			e.failing = false
-			e.log.Info("stakeout feed recovered", "status", status)
+			e.log.Info("analytics feed recovered", "status", status)
 		}
 		e.sent.Add(n)
 		return true
@@ -335,7 +335,7 @@ func (e *Emitter) send(body []byte, n uint64, until time.Time, final bool) (ok b
 		}
 		e.noteFailure(err, "batch dropped", pause)
 	default:
-		// 401 and the rest: Stakeout refuses the feed and will again, so the batch goes and the feed pauses.
+		// 401 and the rest: Trakk refuses the feed and will again, so the batch goes and the feed pauses.
 		e.noteFailure(err, "batch dropped", e.pause(0))
 	}
 	e.failed.Add(n)
@@ -362,7 +362,7 @@ func (e *Emitter) pause(retryAfter time.Duration) time.Duration {
 	return d
 }
 
-// noteFailure logs the first failure of a run at warn and the rest at debug: a dead Stakeout must not flood the app's
+// noteFailure logs the first failure of a run at warn and the rest at debug: a dead Trakk must not flood the app's
 // log.
 func (e *Emitter) noteFailure(err error, what string, pause time.Duration) {
 	lvl := slog.LevelDebug
@@ -370,7 +370,7 @@ func (e *Emitter) noteFailure(err error, what string, pause time.Duration) {
 		e.failing = true
 		lvl = slog.LevelWarn
 	}
-	e.log.Log(context.Background(), lvl, "stakeout feed send failed, "+what, "err", err, "pause", pause)
+	e.log.Log(context.Background(), lvl, "analytics feed send failed, "+what, "err", err, "pause", pause)
 }
 
 // post sends one batch. It returns the status and the Retry-After the answer asked for, if any.
@@ -387,7 +387,7 @@ func (e *Emitter) post(body []byte) (int, time.Duration, error) {
 	if err != nil {
 		return 0, 0, err // names the URL, never the key (it travels in a header)
 	}
-	// Drain a little so the connection can be reused; Stakeout's answers are empty.
+	// Drain a little so the connection can be reused; Trakk's answers are empty.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 	_ = resp.Body.Close()
 	var retryAfter time.Duration
@@ -421,9 +421,9 @@ func (e *Emitter) logStats(final bool) {
 		return
 	}
 	e.lastLogged = s
-	msg := "stakeout feed"
+	msg := "analytics feed"
 	if final {
-		msg = "stakeout feed stopped"
+		msg = "analytics feed stopped"
 	}
 	e.log.Info(msg, "sent", s.Sent, "dropped", s.Dropped, "failed", s.Failed)
 }

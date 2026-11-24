@@ -1,4 +1,4 @@
-package stakeout
+package analytics
 
 import (
 	"context"
@@ -39,7 +39,7 @@ func Recorder(next http.Handler) http.Handler {
 
 // RecordRoute notes the pattern the mux inside matched (r.Pattern, which the mux sets on the request it is handed).
 // catchAll names the mux's fallback patterns ("GET /", "/"): a request they answer is no route of the app's, so its
-// route stays empty and Stakeout names the path by the site's rules. Without Recorder outside it only passes the
+// route stays empty and Trakk names the path by the site's rules. Without Recorder outside it only passes the
 // request on. Panics too: the deferred copy runs before a Recover outside answers.
 func RecordRoute(next http.Handler, catchAll ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,8 +64,8 @@ func SetAccount(ctx context.Context, id string) {
 }
 
 // SetOp names what the request did inside its route, where one route serves several things (an MCP tool): a name from
-// the app's own fixed list, never text a client chose, which Stakeout would list. ASCII letters, digits and _ . / : -
-// only (Stakeout stores the rest as _), at most 64 bytes. A request without Recorder outside ignores it.
+// the app's own fixed list, never text a client chose, which Trakk would list. ASCII letters, digits and _ . / : -
+// only (Trakk stores the rest as _), at most 64 bytes. A request without Recorder outside ignores it.
 func SetOp(ctx context.Context, op string) {
 	if rec, ok := ctx.Value(recordKey{}).(*record); ok {
 		rec.op = op
@@ -80,7 +80,7 @@ func SetError(ctx context.Context, code string) {
 	}
 }
 
-// EventFrom maps a finished request to Stakeout's fields, and only those: the query, cookies, credentials and every
+// EventFrom maps a finished request to Trakk's fields, and only those: the query, cookies, credentials and every
 // other header stay in the app. ip is the client as the app resolves it (after its trusted proxies), status and dur
 // what the access log measured; route, bytes, account, operation and failure come from Recorder's record.
 func EventFrom(r *http.Request, ip string, status int, dur time.Duration) Event {
@@ -110,7 +110,7 @@ func EventFrom(r *http.Request, ip string, status int, dur time.Duration) Event 
 	return ev
 }
 
-// referrer is the Referer without its query and fragment: another site's query can carry a token, and Stakeout needs
+// referrer is the Referer without its query and fragment: another site's query can carry a token, and Trakk needs
 // where a visitor came from, not what they carried.
 func referrer(ref string) string {
 	if i := strings.IndexAny(ref, "?#"); i >= 0 {

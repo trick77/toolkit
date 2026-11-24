@@ -1,7 +1,7 @@
 # AGENTS.md
 
 - What lives here: shared libraries that are not base plumbing (integrations with the outside: mcpserver, llmwire,
-  webfetch, applemusic, stakeout). Base functionality goes to ship's kit; a library for
+  webfetch, applemusic, analytics). Base functionality goes to ship's kit; a library for
   one app stays in that app. User: kit "is more about common base functionality"; a repo per library "is totally
   overblown". llmwire and webfetch were own repos (archived after the move); their rules are their dir's AGENTS.md.
 - One module, one version line, a package per library. No nested go.mod: every new module costs release wiring.
@@ -12,9 +12,10 @@
   Keep both callers' behavior when changing get.
 - mcpserver: protocol only. App concepts stay in the app (loom's X-Loom-User is loom's `internal/loomuser`, named via
   `Server.UserHeader`; peeq's channel hint rides `InstructionsFunc`/`DescriptionFunc`).
-- stakeout: the contract is trick77/stakeout's INTEGRATION.md; `Event` carries exactly its fields, never more (raw
+- analytics: named after the `ANALYTICS_*` settings it reads, never after the product (user: no import may change with
+  a product's name). The contract is trick77/trakk's INTEGRATION.md; `Event` carries exactly its fields, never more (raw
   headers carry cookies and credentials). Consumers: ipverse lens, lens-console, lens-gateway. Retry follows the
-  contract (lens' first emitter dropped failed batches; changed 2026-11-23). `retryWindow` < 1 h: Stakeout files an
+  contract (lens' first emitter dropped failed batches; changed 2026-11-23). `retryWindow` < 1 h: Trakk files an
   event over an hour old at the receive time.
 
 ## Git & CI
