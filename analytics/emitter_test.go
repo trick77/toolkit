@@ -251,9 +251,9 @@ func TestEmitterFlushesOnTimer(t *testing.T) {
 	tun.flushInterval = 10 * time.Millisecond
 	e := startTest(t, tun, f)
 	e.Enqueue(Event{IP: testIP, Path: "/"})
-	waitFor(t, "the timer's send", func() bool { return len(f.requests()) == 1 })
-	if s := e.Stats(); s.Sent != 1 {
-		t.Errorf("stats %+v, want 1 sent", s)
+	waitFor(t, "the timer's send", func() bool { return e.Stats().Sent == 1 })
+	if n := len(f.requests()); n != 1 {
+		t.Errorf("%d requests, want 1", n)
 	}
 }
 
@@ -295,11 +295,19 @@ func TestEmitterDropsWhenFull(t *testing.T) {
 	}
 }
 
-// countSends counts the sends whose outcome (pause, held batch, counters) is in place: a test moves the clock only
-// after that, or the pause would start from the moved clock.
+// countSends counts the sends whose outcome (pause, backlog, counters) is in place: a test moves the clock only after
+// that, or the pause would start from the moved clock.
 func countSends(tun *tuning) *atomic.Int64 {
 	var n atomic.Int64
 	tun.onSend = func() { n.Add(1) }
+	return &n
+}
+
+// countAdds counts the events in the backlog once the sender has done with them: a test moves the clock only then, or
+// they would count as arrived after the pause.
+func countAdds(tun *tuning) *atomic.Int64 {
+	var n atomic.Int64
+	tun.onTurn = n.Store
 	return &n
 }
 
@@ -317,8 +325,7 @@ func paths(t *testing.T, reqs []captured) [][]string {
 	return out
 }
 
-// A 429 holds the batch for Retry-After and sends it again; what arrives meanwhile fills the next batch behind it, and
-// past a full one is dropped.
+// A 429 holds the batch for Retry-After and sends it again; what arrives meanwhile waits behind it, however much.
 func TestEmitterRetriesAfter429(t *testing.T) {
 	c := &clock{t: time.Unix(1_800_000_000, 0)}
 	f := &fakeCollector{respond: func(n int, _ *http.Request) (*http.Response, error) {
@@ -329,39 +336,39 @@ func TestEmitterRetriesAfter429(t *testing.T) {
 	}}
 	tun := testTuning()
 	tun.maxBatch, tun.now = 2, c.now
-	sends := countSends(&tun)
+	sends, adds := countSends(&tun), countAdds(&tun)
 	e := startTest(t, tun, f)
 
 	e.Enqueue(Event{IP: testIP, Path: "/1"})
 	e.Enqueue(Event{IP: testIP, Path: "/2"})
 	waitFor(t, "the 429", func() bool { return sends.Load() == 1 })
 	c.add(29 * time.Second)
-	for _, p := range []string{"/3", "/4", "/5"} { // /3 and /4 fill the batch behind the held one; /5 has no room
+	for _, p := range []string{"/3", "/4", "/5"} {
 		e.Enqueue(Event{IP: testIP, Path: p})
 	}
-	waitFor(t, "the drop", func() bool { return e.Stats().Dropped == 1 })
+	waitFor(t, "the events behind the held batch", func() bool { return adds.Load() == 5 })
 	if n := len(f.requests()); n != 1 {
 		t.Fatalf("%d requests during the pause, want only the refused one", n)
 	}
-	if s := e.Stats(); s.Failed != 0 {
-		t.Errorf("stats %+v: a held batch has not failed", s)
+	if s := e.Stats(); s.Failed != 0 || s.Dropped != 0 {
+		t.Errorf("stats %+v: nothing is lost yet", s)
 	}
 	c.add(2 * time.Second)
-	e.Enqueue(Event{IP: testIP, Path: "/6"}) // the pause is over: the held batch first, then the one behind it
-	waitFor(t, "both batches", func() bool { return e.Stats().Sent == 4 })
+	e.Enqueue(Event{IP: testIP, Path: "/6"}) // the pause is over: the held batch first, then what waits behind it
+	waitFor(t, "everything", func() bool { return e.Stats().Sent == 6 })
 	shutdown(t, e)
 	got := paths(t, f.requests())
-	want := [][]string{{"/1", "/2"}, {"/1", "/2"}, {"/3", "/4"}, {"/6"}}
+	want := [][]string{{"/1", "/2"}, {"/1", "/2"}, {"/3", "/4"}, {"/5", "/6"}}
 	if !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("requests %v, want %v", got, want)
 	}
-	if s := e.Stats(); s.Sent != 5 || s.Dropped != 1 || s.Failed != 0 {
-		t.Errorf("stats %+v, want 5 sent, 1 dropped", s)
+	if s := e.Stats(); s.Sent != 6 || s.Dropped != 0 || s.Failed != 0 {
+		t.Errorf("stats %+v, want 6 sent", s)
 	}
 }
 
-// A 5xx, a 408 or a network error holds the batch too, the pause doubling per failure; a success sends it and ends
-// the pause.
+// Any other failure holds the batch too (a proxy's 404 while Trakk is being recreated, a redirect, never followed), the
+// pause doubling per failure; a success sends it and ends the pause.
 func TestEmitterRetriesOnFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -371,6 +378,10 @@ func TestEmitterRetriesOnFailure(t *testing.T) {
 			return answer(http.StatusServiceUnavailable, nil), nil
 		}},
 		{"408", func(int, *http.Request) (*http.Response, error) { return answer(http.StatusRequestTimeout, nil), nil }},
+		{"404", func(int, *http.Request) (*http.Response, error) { return answer(http.StatusNotFound, nil), nil }},
+		{"redirect", func(int, *http.Request) (*http.Response, error) {
+			return answer(http.StatusFound, http.Header{"Location": {"https://elsewhere.example/"}}), nil
+		}},
 		{"network", func(int, *http.Request) (*http.Response, error) { return nil, errors.New("connection refused") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -387,7 +398,7 @@ func TestEmitterRetriesOnFailure(t *testing.T) {
 			}}
 			tun := testTuning()
 			tun.maxBatch, tun.now, tun.backoffMin = 1, c.now, time.Minute
-			sends := countSends(&tun)
+			sends, adds := countSends(&tun), countAdds(&tun)
 			e := startTest(t, tun, f)
 
 			e.Enqueue(Event{IP: testIP, Path: "/1"})
@@ -397,101 +408,288 @@ func TestEmitterRetriesOnFailure(t *testing.T) {
 			waitFor(t, "the second failure", func() bool { return sends.Load() == 2 })
 			c.add(time.Minute) // the pause doubled: still on
 			e.Enqueue(Event{IP: testIP, Path: "/3"})
-			waitFor(t, "the drop behind the full batch", func() bool { return e.Stats().Dropped == 1 })
+			waitFor(t, "/3 in the backlog", func() bool { return adds.Load() == 3 })
 			mu.Lock()
 			fail = false
 			mu.Unlock()
 			c.add(time.Minute)
 			e.Enqueue(Event{IP: testIP, Path: "/4"})
-			waitFor(t, "the recovery", func() bool { return e.Stats().Sent == 3 })
+			waitFor(t, "the recovery", func() bool { return e.Stats().Sent == 4 })
 			shutdown(t, e)
 			got := paths(t, f.requests())
-			want := [][]string{{"/1"}, {"/1"}, {"/1"}, {"/2"}, {"/4"}}
+			want := [][]string{{"/1"}, {"/1"}, {"/1"}, {"/2"}, {"/3"}, {"/4"}}
 			if !slices.EqualFunc(got, want, slices.Equal) {
 				t.Errorf("requests %v, want %v", got, want)
 			}
-			if s := e.Stats(); s.Sent != 3 || s.Dropped != 1 || s.Failed != 0 {
-				t.Errorf("stats %+v, want 3 sent, 1 dropped", s)
+			if s := e.Stats(); s.Sent != 4 || s.Dropped != 0 || s.Failed != 0 {
+				t.Errorf("stats %+v, want 4 sent", s)
 			}
 		})
 	}
 }
 
-// A held batch is given up once its retry window has passed.
-func TestEmitterRetryWindow(t *testing.T) {
+// An event is given up at its own age, whenever its batch was first sent: one that would reach Trakk over an hour old
+// would be dated at receipt. One old when it arrived (a stream that ran for hours) goes out all the same.
+func TestEmitterGivesUpByAge(t *testing.T) {
 	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	var mu sync.Mutex
+	fail := true
 	f := &fakeCollector{respond: func(int, *http.Request) (*http.Response, error) {
-		return answer(http.StatusServiceUnavailable, nil), nil
+		mu.Lock()
+		defer mu.Unlock()
+		if fail {
+			return answer(http.StatusServiceUnavailable, nil), nil
+		}
+		return answer(http.StatusNoContent, nil), nil
 	}}
 	tun := testTuning()
-	tun.maxBatch, tun.now, tun.backoffMin, tun.backoffMax = 1, c.now, time.Minute, time.Minute
-	tun.retryWindow = 150 * time.Second
-	sends := countSends(&tun)
+	tun.maxBatch, tun.now, tun.backoffMin, tun.backoffMax = 1, c.now, 20*time.Minute, 20*time.Minute
+	sends, adds := countSends(&tun), countAdds(&tun)
 	e := startTest(t, tun, f)
-	e.Enqueue(Event{IP: testIP, Path: "/1"})
-	waitFor(t, "the first failure", func() bool { return sends.Load() == 1 })
-	c.add(time.Minute)
-	e.Enqueue(Event{IP: testIP, Path: "/2"}) // retry at 1 min: held again (the next one at 2 min is in the window)
-	waitFor(t, "the retry", func() bool { return sends.Load() == 2 })
-	if s := e.Stats(); s.Failed != 0 {
-		t.Fatalf("stats %+v, want the batch still held", s)
+	at := func(ago time.Duration, path string) Event {
+		return Event{IP: testIP, Path: path, T: c.now().Add(-ago).UnixMilli()}
 	}
-	c.add(time.Minute)
-	e.Enqueue(Event{IP: testIP, Path: "/3"}) // retry at 2 min: the next one (3 min) is past the window, given up
-	waitFor(t, "the give-up", func() bool { return e.Stats().Failed == 1 })
+	e.Enqueue(at(0, "/tried"))
+	waitFor(t, "the failure", func() bool { return sends.Load() == 1 })
+	c.add(10 * time.Minute)
+	e.Enqueue(at(30*time.Minute, "/long")) // 30 minutes old when it ended: 25 left, its batch never sent
+	e.Enqueue(at(3*time.Hour, "/stream"))
+	e.Enqueue(at(0, "/fresh"))
+	waitFor(t, "the events", func() bool { return adds.Load() == 4 })
+	mu.Lock()
+	fail = false
+	mu.Unlock()
+	c.add(45 * time.Minute) // /tried is 55 minutes old now, /long 75
+	e.Enqueue(at(0, "/new"))
+	waitFor(t, "the recovery", func() bool { return e.Stats().Sent == 3 })
+	shutdown(t, e)
+	got := paths(t, f.requests())
+	want := [][]string{{"/tried"}, {"/stream"}, {"/fresh"}, {"/new"}}
+	if !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("requests %v, want %v", got, want)
+	}
+	if s := e.Stats(); s.Failed != 1 || s.Dropped != 1 {
+		t.Errorf("stats %+v, want 1 failed (tried), 1 dropped (never sent)", s)
+	}
 }
 
-// 401 and a redirect mean Trakk refuses the feed: the batch is dropped, never sent again, and the feed pauses,
-// doubling; a success ends it.
+// How long an event lives, by its age on arrival: never less than minLife, or a request nearly maxAge long would be
+// given up before its first send.
+func TestExpires(t *testing.T) {
+	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	tun := defaults()
+	tun.now = c.now
+	e := newEmitter(testCfg, nil, tun, &fakeCollector{})
+	for age, want := range map[time.Duration]time.Duration{0: maxAge, 30 * time.Minute: 25 * time.Minute,
+		54 * time.Minute: minLife, maxAge - time.Second: minLife, maxAge: maxAge, 5 * time.Hour: maxAge} {
+		if got := e.expires(Event{T: c.now().Add(-age).UnixMilli()}).Sub(c.now()); got != want {
+			t.Errorf("an event %v old on arrival lives %v, want %v", age, got, want)
+		}
+	}
+}
+
+// What arrives during a flush waits for its own turn: steady traffic is batched, and the flush ends.
+func TestFlushEndsUnderSteadyTraffic(t *testing.T) {
+	tun := testTuning()
+	f := &fakeCollector{}
+	e := newEmitter(testCfg, slog.New(slog.DiscardHandler), tun, f)
+	f.respond = func(int, *http.Request) (*http.Response, error) {
+		e.Enqueue(Event{IP: testIP, Path: "/meanwhile"})
+		return answer(http.StatusNoContent, nil), nil
+	}
+	e.add(Event{IP: testIP, Path: "/1"})
+	e.add(Event{IP: testIP, Path: "/2"})
+	e.flush(true)
+	if got, want := paths(t, f.requests()), [][]string{{"/1", "/2"}}; !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("requests %v, want %v", got, want)
+	}
+	if len(e.backlog) != 1 {
+		t.Errorf("%d events wait, want the one that arrived meanwhile", len(e.backlog))
+	}
+}
+
+// A 400 after an outage is an answer: the pause is over, and events are batched again rather than sent one by one.
+func TestRefusalEndsThePause(t *testing.T) {
+	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	tun := testTuning()
+	tun.now = c.now
+	f := &fakeCollector{respond: func(n int, _ *http.Request) (*http.Response, error) {
+		if n == 0 {
+			return answer(http.StatusNotFound, nil), nil
+		}
+		return answer(http.StatusBadRequest, nil), nil
+	}}
+	e := newEmitter(testCfg, slog.New(slog.DiscardHandler), tun, f)
+	e.add(Event{IP: testIP, Path: "/1"})
+	e.flush(true)
+	if e.backoff == 0 || !e.pausing() {
+		t.Fatal("no pause after the 404")
+	}
+	c.add(time.Minute)
+	e.flush(true)
+	if e.backoff != 0 || e.pausing() || len(e.backlog) != 0 || e.Stats().Failed != 1 {
+		t.Errorf("backoff %v, pausing %v, %d waiting, stats %+v after the 400", e.backoff, e.pausing(), len(e.backlog), e.Stats())
+	}
+}
+
+// A batch a firewall refuses for what is in it (403) goes, and what waits behind it gets through.
+func TestRefusedBatchDoesNotBlockTheFeed(t *testing.T) {
+	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	tun := testTuning()
+	tun.maxBatch, tun.now = 1, c.now
+	f := &fakeCollector{respond: func(n int, _ *http.Request) (*http.Response, error) {
+		if n == 0 {
+			return answer(http.StatusForbidden, nil), nil
+		}
+		return answer(http.StatusNoContent, nil), nil
+	}}
+	e := newEmitter(testCfg, slog.New(slog.DiscardHandler), tun, f)
+	e.add(Event{IP: testIP, Path: "/../../etc/passwd"})
+	e.add(Event{IP: testIP, Path: "/fine"})
+	e.flush(true)
+	c.add(time.Minute)
+	e.flush(true)
+	if s := e.Stats(); s.Sent != 1 || s.Failed != 1 || s.Dropped != 0 {
+		t.Errorf("stats %+v, want 1 sent, 1 failed", s)
+	}
+}
+
+// The backlog is bounded in bytes: the oldest go.
+func TestEmitterBoundsTheBacklog(t *testing.T) {
+	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	f := &fakeCollector{respond: func(n int, _ *http.Request) (*http.Response, error) {
+		if n == 0 {
+			return answer(http.StatusServiceUnavailable, nil), nil
+		}
+		return answer(http.StatusNoContent, nil), nil
+	}}
+	tun := testTuning()
+	tun.maxBatch, tun.now = 1, c.now
+	one, err := json.Marshal(Event{IP: testIP, Path: "/1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tun.maxBacklog = 3 * (len(one) + 1)
+	sends, adds := countSends(&tun), countAdds(&tun)
+	e := startTest(t, tun, f)
+	e.Enqueue(Event{IP: testIP, Path: "/1"})
+	waitFor(t, "the failure", func() bool { return sends.Load() == 1 })
+	for _, p := range []string{"/2", "/3", "/4", "/5"} {
+		e.Enqueue(Event{IP: testIP, Path: p})
+	}
+	waitFor(t, "the events", func() bool { return adds.Load() == 5 })
+	if s := e.Stats(); s.Failed != 1 || s.Dropped != 1 {
+		t.Errorf("stats %+v, want /1 failed and /2 dropped", s)
+	}
+	c.add(time.Hour / 2)
+	shutdown(t, e)
+	if got, want := paths(t, f.requests()), [][]string{{"/1"}, {"/3"}, {"/4"}, {"/5"}}; !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("requests %v, want %v", got, want)
+	}
+	if e.size != 0 || len(e.backlog) != 0 {
+		t.Errorf("%d events, %d bytes left", len(e.backlog), e.size)
+	}
+}
+
+// A 401 means Trakk refuses the feed: the batch is dropped, never sent again, and the feed pauses, doubling. What
+// arrives meanwhile waits: a success ends the pause and takes it along.
 func TestEmitterDropsRefusedFeed(t *testing.T) {
+	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	var mu sync.Mutex
+	fail := true
+	f := &fakeCollector{respond: func(int, *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if fail {
+			return answer(http.StatusUnauthorized, nil), nil
+		}
+		return answer(http.StatusNoContent, nil), nil
+	}}
+	tun := testTuning()
+	tun.maxBatch, tun.now, tun.backoffMin = 1, c.now, time.Minute
+	adds := countAdds(&tun)
+	e := startTest(t, tun, f)
+
+	e.Enqueue(Event{IP: testIP, Path: "/1"})
+	waitFor(t, "the failure", func() bool { return e.Stats().Failed == 1 })
+	e.Enqueue(Event{IP: testIP, Path: "/2"})
+	waitFor(t, "/2 in the backlog", func() bool { return adds.Load() == 2 })
+	c.add(time.Minute)
+	e.Enqueue(Event{IP: testIP, Path: "/3"})
+	waitFor(t, "the second failure", func() bool { return e.Stats().Failed == 2 })
+	c.add(time.Minute) // the pause doubled: still on
+	e.Enqueue(Event{IP: testIP, Path: "/4"})
+	waitFor(t, "/4 in the backlog", func() bool { return adds.Load() == 4 })
+	mu.Lock()
+	fail = false
+	mu.Unlock()
+	c.add(time.Minute)
+	e.Enqueue(Event{IP: testIP, Path: "/5"})
+	waitFor(t, "the recovery", func() bool { return e.Stats().Sent == 3 })
+	e.Enqueue(Event{IP: testIP, Path: "/6"}) // the pause is over: no wait
+	waitFor(t, "the next send", func() bool { return e.Stats().Sent == 4 })
+	shutdown(t, e)
+	got := paths(t, f.requests())
+	if want := [][]string{{"/1"}, {"/2"}, {"/3"}, {"/4"}, {"/5"}, {"/6"}}; !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("requests %v, want %v", got, want)
+	}
+	if s := e.Stats(); s.Failed != 2 || s.Dropped != 0 {
+		t.Errorf("stats %+v, want 2 failed", s)
+	}
+}
+
+// Shutdown sends the whole backlog once more, pause or not, and stops at the first failure.
+func TestEmitterShutdownSendsTheBacklog(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		respond func(int, *http.Request) (*http.Response, error)
-	}{
-		{"401", func(int, *http.Request) (*http.Response, error) { return answer(http.StatusUnauthorized, nil), nil }},
-		{"redirect", func(int, *http.Request) (*http.Response, error) {
-			return answer(http.StatusFound, http.Header{"Location": {"https://elsewhere.example/"}}), nil
-		}},
-	} {
+		name                  string
+		ok                    bool
+		sent, failed, dropped uint64
+	}{{"Trakk back", true, 3, 0, 0}, {"Trakk still away", false, 0, 1, 2}} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := &clock{t: time.Unix(1_800_000_000, 0)}
-			var mu sync.Mutex
-			fail := true
-			f := &fakeCollector{respond: func(n int, r *http.Request) (*http.Response, error) {
-				mu.Lock()
-				defer mu.Unlock()
-				if fail {
-					return tc.respond(n, r)
+			f := &fakeCollector{respond: func(n int, _ *http.Request) (*http.Response, error) {
+				if n == 0 || !tc.ok {
+					return answer(http.StatusServiceUnavailable, nil), nil
 				}
 				return answer(http.StatusNoContent, nil), nil
 			}}
 			tun := testTuning()
-			tun.maxBatch, tun.now, tun.backoffMin = 1, c.now, time.Minute
+			tun.maxBatch, tun.backoffMin = 1, time.Hour
+			sends, adds := countSends(&tun), countAdds(&tun)
 			e := startTest(t, tun, f)
-
 			e.Enqueue(Event{IP: testIP, Path: "/1"})
-			waitFor(t, "the failure", func() bool { return e.Stats().Failed == 1 })
+			waitFor(t, "the failure", func() bool { return sends.Load() == 1 })
 			e.Enqueue(Event{IP: testIP, Path: "/2"})
-			waitFor(t, "the drop", func() bool { return e.Stats().Dropped == 1 })
-			c.add(time.Minute)
 			e.Enqueue(Event{IP: testIP, Path: "/3"})
-			waitFor(t, "the second failure", func() bool { return e.Stats().Failed == 2 })
-			c.add(time.Minute) // the pause doubled: still on
-			e.Enqueue(Event{IP: testIP, Path: "/4"})
-			waitFor(t, "the second drop", func() bool { return e.Stats().Dropped == 2 })
-			mu.Lock()
-			fail = false
-			mu.Unlock()
-			c.add(time.Minute)
-			e.Enqueue(Event{IP: testIP, Path: "/5"})
-			waitFor(t, "the recovery", func() bool { return e.Stats().Sent == 1 })
-			e.Enqueue(Event{IP: testIP, Path: "/6"}) // the pause is over: no wait
-			waitFor(t, "the next send", func() bool { return e.Stats().Sent == 2 })
+			waitFor(t, "the events", func() bool { return adds.Load() == 3 })
 			shutdown(t, e)
-			if n := len(f.requests()); n != 4 {
-				t.Errorf("%d requests, want 4 (no follow, no retry)", n)
+			if s := e.Stats(); s.Sent != tc.sent || s.Failed != tc.failed || s.Dropped != tc.dropped {
+				t.Errorf("stats %+v, want %d sent, %d failed, %d dropped", s, tc.sent, tc.failed, tc.dropped)
 			}
 		})
+	}
+}
+
+// The run's first 401 warns even when Trakk was away before it: it needs a hand.
+func TestEmitterWarnsOfARefusalAfterAnOutage(t *testing.T) {
+	var buf safeBuffer
+	f := &fakeCollector{respond: func(n int, _ *http.Request) (*http.Response, error) {
+		if n == 0 {
+			return answer(http.StatusBadGateway, nil), nil
+		}
+		return answer(http.StatusUnauthorized, nil), nil
+	}}
+	tun := testTuning()
+	tun.maxBatch, tun.backoffMin, tun.backoffMax = 1, time.Nanosecond, time.Nanosecond
+	sends := countSends(&tun)
+	e := start(testCfg, slog.New(slog.NewTextHandler(&buf, nil)), tun, f)
+	e.Enqueue(Event{IP: testIP, Path: "/1"})
+	waitFor(t, "the outage", func() bool { return sends.Load() >= 1 })
+	time.Sleep(time.Millisecond)
+	e.Enqueue(Event{IP: testIP, Path: "/2"})
+	waitFor(t, "the refusals", func() bool { return sends.Load() >= 2 })
+	shutdown(t, e)
+	if out := buf.String(); strings.Count(out, "status 502") != 1 || strings.Count(out, "status 401") != 1 {
+		t.Errorf("want one warning each for the 502 and the 401:\n%s", out)
 	}
 }
 

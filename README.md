@@ -86,9 +86,10 @@ if set.Feed != nil {
 // from fixed lists of the app. What mcpserver refuses itself (an unknown tool) reaches neither.
 ```
 
-The emitter never blocks a request: a full queue drops. A batch that failed on the way (network, 408, 429, 5xx) is
-sent again after `Retry-After` or a doubling back-off, for up to 45 minutes (Trakk dates older events at receipt);
-one Trakk refused (400, 401, 413, …) is dropped and logged.
+The emitter never blocks a request: a full queue drops. A batch that failed because Trakk is away (network, 408, 429, 5xx,
+a proxy's 404 while its container is recreated) goes again after `Retry-After` or a doubling back-off; a refused one
+(400, 401, 413, any other 4xx) is dropped and logged. Meanwhile up to 4 MiB of events wait, each until it is 55 minutes
+old (Trakk dates older ones at receipt).
 
 ## Development
 

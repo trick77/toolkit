@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -28,10 +29,14 @@ const (
 	backoffMin    = 5 * time.Second  // first pause after a failed send, doubling per failure
 	backoffMax    = 5 * time.Minute  // longest pause, Retry-After included
 	statsInterval = 10 * time.Minute // the counters' log line
-	// retryWindow is how long a batch is offered again after its first failure. Trakk files an event whose t is
-	// over an hour behind at the receive time instead, so an older batch would land at the wrong time: 45 minutes
-	// leaves room for the batch's own age (up to flushInterval) and the last send.
-	retryWindow = 45 * time.Minute
+	// maxBacklog bounds the encoded events waiting to be sent, in bytes (an event's size is the client's doing: JSON
+	// escapes a byte to six): past it the oldest go, so a long outage costs history, never memory.
+	maxBacklog = 4 << 20
+	// maxAge is when an event is given up. Trakk files one whose t is over an hour behind at the receive time instead,
+	// so it would land at the wrong time: 55 minutes leave room for the last send. A request nearly that old when it
+	// ended (a stream) gets minLife all the same: dated a little late beats lost.
+	maxAge  = 55 * time.Minute
+	minLife = 2 * backoffMax
 )
 
 // Config says where the feed goes. Endpoint is Trakk's origin + FeedPath.
@@ -43,40 +48,40 @@ type Config struct {
 
 // tuning holds the limits; tests shrink them.
 type tuning struct {
-	bufferSize, maxBatch, maxBody                      int
+	bufferSize, maxBatch, maxBody, maxBacklog          int
 	flushInterval, sendTimeout, backoffMin, backoffMax time.Duration
-	statsInterval, retryWindow                         time.Duration
+	statsInterval, maxAge, minLife                     time.Duration
 	now                                                func() time.Time
-	onSend                                             func() // after a send's outcome is in place; tests only
+	onSend                                             func()            // after a send's outcome is in place; tests only
+	onTurn                                             func(added int64) // after a turn of run's loop, its flush included; tests only
 }
 
 func defaults() tuning {
 	return tuning{
-		bufferSize: bufferSize, maxBatch: maxBatch, maxBody: maxBody,
+		bufferSize: bufferSize, maxBatch: maxBatch, maxBody: maxBody, maxBacklog: maxBacklog,
 		flushInterval: flushInterval, sendTimeout: sendTimeout, backoffMin: backoffMin, backoffMax: backoffMax,
-		statsInterval: statsInterval, retryWindow: retryWindow, now: time.Now,
+		statsInterval: statsInterval, maxAge: maxAge, minLife: minLife, now: time.Now,
 	}
 }
 
 // Stats are the emitter's counters since start, in events.
 type Stats struct {
 	Sent    uint64 // accepted by Trakk (2xx), on the first send or a later one
-	Dropped uint64 // never sent: queue full, during a back-off, after shutdown, or no valid ip
-	Failed  uint64 // sent and given up on: refused, or still failing when the retry window or shutdown ends it
+	Dropped uint64 // never sent: queue or backlog full, too old, after shutdown, or no valid ip
+	Failed  uint64 // sent and given up on: refused, or still failing when its age, the backlog's bound or shutdown ends it
 }
 
-// held is a batch that failed in a way Trakk's contract says to send again (a network error, 408, 429, 5xx).
-type held struct {
-	body  []byte
-	n     uint64
-	until time.Time // the end of its retry window
+// item is an encoded event in the backlog.
+type item struct {
+	b       []byte
+	expires time.Time
+	tried   bool // sent at least once
 }
 
-// Emitter batches events to Trakk's feed from one background goroutine. Enqueue never blocks. A batch that
-// failed on the way (a network error, 408, 429, 5xx) is held and sent again after the pause (Retry-After, else a
-// doubling back-off) for up to retryWindow; one Trakk refused (400, 401, 413, anything else) is dropped. While a
-// batch is held, one more batch fills behind it and what arrives past that is dropped: a struggling Trakk gets
-// the same traffic later, not more.
+// Emitter batches events to Trakk's feed from one background goroutine. Enqueue never blocks. Events wait in one
+// bounded backlog, oldest first out. A batch that failed because Trakk is away (retryable) stays and goes again after
+// the pause (Retry-After, else a doubling back-off), each event until maxAge. One that was refused is dropped: a 400 or
+// 413 is that batch's fault, anything else (401, a firewall's 403) pauses the feed too, the events behind it waiting.
 type Emitter struct {
 	cfg    Config
 	tun    tuning
@@ -96,13 +101,14 @@ type Emitter struct {
 	sent, dropped, failed atomic.Uint64
 
 	// Sender goroutine only.
-	pending     [][]byte // encoded events
-	pendingSize int      // their bytes, commas included
-	retry       *held    // the batch to send again once the pause is over; pending waits behind it
-	backoff     time.Duration
-	resumeAt    time.Time
-	failing     bool  // the last send failed: logged once, until one succeeds
-	lastLogged  Stats // the counters at the last stats line
+	backlog        []item
+	size           int           // the backlog's bytes, a comma per event included
+	added, removed int64         // events into and out of the backlog since start
+	backoff        time.Duration // the last pause; 0 once Trakk answers
+	resumeAt       time.Time
+	failing        bool  // the last send failed: logged once, until one succeeds
+	refused        int   // the refusal this run warned of last, a status
+	lastLogged     Stats // the counters at the last stats line
 }
 
 // Start runs the sender until Shutdown.
@@ -111,6 +117,12 @@ func Start(cfg Config, log *slog.Logger) *Emitter {
 }
 
 func start(cfg Config, log *slog.Logger, tun tuning, transport http.RoundTripper) *Emitter {
+	e := newEmitter(cfg, log, tun, transport)
+	go e.run()
+	return e
+}
+
+func newEmitter(cfg Config, log *slog.Logger, tun tuning, transport http.RoundTripper) *Emitter {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -119,7 +131,7 @@ func start(cfg Config, log *slog.Logger, tun tuning, transport http.RoundTripper
 	}
 	prefix, _ := json.Marshal(cfg.Site)
 	hard, cancel := context.WithCancel(context.Background())
-	e := &Emitter{
+	return &Emitter{
 		cfg: cfg,
 		tun: tun,
 		client: &http.Client{
@@ -136,8 +148,6 @@ func start(cfg Config, log *slog.Logger, tun tuning, transport http.RoundTripper
 		hard:       hard,
 		cancelHard: cancel,
 	}
-	go e.run()
-	return e
 }
 
 // Enqueue hands ev to the sender without blocking: a full queue, a stopped emitter, or an event Trakk would refuse
@@ -197,20 +207,27 @@ func (e *Emitter) run() {
 		select {
 		case ev := <-e.ch:
 			e.add(ev)
+			// A full batch goes at once, and what waited out a pause as soon as it is over.
+			if e.backoff > 0 {
+				e.flush(true)
+			} else if e.full() {
+				e.flush(false)
+			}
 		case <-flush.C:
-			e.flush(false)
+			e.flush(true)
 		case <-stats.C:
 			e.logStats(false)
 		case <-e.stop:
 			// What was queued before the stop; an Enqueue racing it counts itself as dropped or lands here.
-			for range len(e.ch) {
-				e.add(<-e.ch)
-			}
-			e.flush(true)
+			e.drain()
+			e.finish()
 			// Anything that slipped in after the drain: never sent.
 			e.dropped.Add(uint64(len(e.ch)))
 			e.logStats(true)
 			return
+		}
+		if e.tun.onTurn != nil {
+			e.tun.onTurn(e.added)
 		}
 	}
 }
@@ -218,99 +235,157 @@ func (e *Emitter) run() {
 // pausing reports whether a back-off is running.
 func (e *Emitter) pausing() bool { return e.tun.now().Before(e.resumeAt) }
 
-// add appends ev to the batch, sending first when ev would push it over a limit, and after when it fills it. With a
-// batch held for a retry, the pending batch only fills: a full one drops what comes next until the held one is out.
+// add puts ev into the backlog, the oldest making room for it.
 func (e *Emitter) add(ev Event) {
-	if e.retry != nil && !e.pausing() {
-		e.flush(false) // the pause is over: the held batch goes first
-	}
-	if e.retry == nil && e.pausing() {
-		e.dropped.Add(1)
-		return
-	}
 	b, err := json.Marshal(ev)
-	if err != nil { // cannot happen for Event's field types; counted all the same
+	if err != nil || e.envelope()+len(b) > e.tun.maxBody { // neither happens within the field limits; counted all the same
 		e.dropped.Add(1)
 		return
 	}
-	envelope := len(e.prefix) + len("]}")
-	if envelope+len(b) > e.tun.maxBody { // the field limits keep an event far below it; never send one Trakk refuses
-		e.dropped.Add(1)
-		return
+	n := 0
+	for size := e.size; n < len(e.backlog) && size+len(b)+1 > e.tun.maxBacklog; n++ {
+		size -= len(e.backlog[n].b) + 1
 	}
-	if len(e.pending) >= e.tun.maxBatch || len(e.pending) > 0 && envelope+e.pendingSize+1+len(b) > e.tun.maxBody {
-		if e.retry != nil {
-			e.dropped.Add(1)
-			return
-		}
-		e.flush(false)
-		if e.retry == nil && e.pausing() {
-			e.dropped.Add(1)
-			return
-		}
+	e.giveUp(n)
+	e.backlog = append(e.backlog, item{b: b, expires: e.expires(ev)})
+	e.size += len(b) + 1
+	e.added++
+}
+
+// expires is when ev, just arrived, is given up.
+func (e *Emitter) expires(ev Event) time.Time {
+	now := e.tun.now()
+	t := time.UnixMilli(ev.T).Add(e.tun.maxAge)
+	if !now.Before(t) { // a long stream, only now over: Trakk dates it at receipt whatever we do
+		return now.Add(e.tun.maxAge)
 	}
-	if len(e.pending) > 0 {
-		e.pendingSize++ // the comma
+	if least := now.Add(e.tun.minLife); t.Before(least) {
+		return least
 	}
-	e.pending = append(e.pending, b)
-	e.pendingSize += len(b)
-	if len(e.pending) >= e.tun.maxBatch && e.retry == nil {
-		e.flush(false)
+	return t
+}
+
+// drain takes what is queued right now.
+func (e *Emitter) drain() {
+	for range len(e.ch) {
+		e.add(<-e.ch)
 	}
 }
 
-// flush sends the held batch when its pause is over, then the pending one. A pause without a held batch (Trakk
-// refused the feed) drops the pending batch. final (shutdown) sends each once, pause or not, and holds nothing.
-func (e *Emitter) flush(final bool) {
-	if r := e.retry; r != nil {
-		if !final && e.pausing() {
-			return
+// take removes the n oldest events.
+func (e *Emitter) take(n int) {
+	for i := range n {
+		e.size -= len(e.backlog[i].b) + 1
+		e.removed++
+	}
+	clear(e.backlog[:n]) // the array lives on under the rest
+	e.backlog = e.backlog[n:]
+}
+
+// giveUp removes the n oldest events and counts them.
+func (e *Emitter) giveUp(n int) {
+	for _, it := range e.backlog[:n] {
+		e.countLost(it)
+	}
+	e.take(n)
+}
+
+func (e *Emitter) countLost(it item) {
+	if it.tried {
+		e.failed.Add(1)
+	} else {
+		e.dropped.Add(1)
+	}
+}
+
+// expire gives up the events past their age. They are not in order of age: a long request is old when it ends.
+func (e *Emitter) expire() {
+	now := e.tun.now()
+	e.backlog = slices.DeleteFunc(e.backlog, func(it item) bool {
+		if now.Before(it.expires) {
+			return false
 		}
-		e.retry = nil
-		if !e.send(r.body, r.n, r.until, final) {
-			if final {
-				e.dropPending()
+		e.size -= len(it.b) + 1
+		e.removed++
+		e.countLost(it)
+		return true
+	})
+}
+
+// envelope is the body's bytes around the events.
+func (e *Emitter) envelope() int { return len(e.prefix) + len("]}") }
+
+// full reports whether the backlog holds a whole batch.
+func (e *Emitter) full() bool {
+	return len(e.backlog) >= e.tun.maxBatch || e.envelope()+e.size > e.tun.maxBody
+}
+
+// batch is the next body and the events it holds: the oldest that fit.
+func (e *Emitter) batch() ([]byte, []item) {
+	body := append(make([]byte, 0, min(e.tun.maxBody, e.envelope()+e.size)), e.prefix...)
+	n := 0
+	for ; n < len(e.backlog) && n < e.tun.maxBatch; n++ {
+		b := e.backlog[n].b
+		if n > 0 {
+			if len(body)+1+len(b)+len("]}") > e.tun.maxBody {
+				break
 			}
+			body = append(body, ',')
+		}
+		body = append(body, b...)
+	}
+	return append(body, "]}"...), e.backlog[:n]
+}
+
+// flush sends batch after batch: with all what is there now, and full ones. What arrives meanwhile waits for its own
+// turn, or steady traffic would go out an event a POST, without end. Nothing during a pause, and a failure or Shutdown
+// (which sends the rest itself) ends it.
+func (e *Emitter) flush(all bool) {
+	until := e.removed
+	if all {
+		until = e.added
+	}
+	for !e.pausing() && !e.stopped.Load() {
+		e.expire()
+		if len(e.backlog) == 0 || e.removed >= until && !e.full() || !e.send(false) {
 			return
 		}
+		e.drain() // a long backlog must not let the queue run full
 	}
-	n := uint64(len(e.pending))
-	if n == 0 {
-		return
-	}
-	body := make([]byte, 0, len(e.prefix)+e.pendingSize+2)
-	body = append(body, e.prefix...)
-	body = append(body, bytes.Join(e.pending, []byte(","))...)
-	body = append(body, "]}"...)
-	clear(e.pending)
-	e.pending, e.pendingSize = e.pending[:0], 0
-	if !final && e.pausing() {
-		e.dropped.Add(n)
-		return
-	}
-	e.send(body, n, time.Time{}, final)
 }
 
-func (e *Emitter) dropPending() {
-	e.dropped.Add(uint64(len(e.pending)))
-	clear(e.pending)
-	e.pending, e.pendingSize = e.pending[:0], 0
+// finish is shutdown's flush: batch after batch, pause or not, until one fails. The rest is lost.
+func (e *Emitter) finish() {
+	for e.expire(); len(e.backlog) > 0 && e.send(true); {
+	}
+	e.giveUp(len(e.backlog))
 }
 
-// send posts one batch of n events. until is the end of its retry window, zero for a first send. ok reports
-// whether the next batch may go right after it: a success, or a refusal of this batch alone (400, 413).
-func (e *Emitter) send(body []byte, n uint64, until time.Time, final bool) (ok bool) {
+// retryable reports whether a failure says Trakk is away, not that it refuses: no answer (status 0), the contract's
+// "send again" (408, 429, 5xx), and what a proxy answers in its place (a 404 while its container is recreated, a
+// redirect to a maintenance page; never followed).
+func retryable(status int) bool {
+	return status < 400 || status == http.StatusNotFound || status == http.StatusRequestTimeout ||
+		status == http.StatusTooManyRequests || status >= 500
+}
+
+// send posts the next batch. ok reports whether another may go right after it: a success, or a refusal of this batch
+// alone (400, 413). final: there is no later one.
+func (e *Emitter) send(final bool) (ok bool) {
 	if e.tun.onSend != nil {
 		defer e.tun.onSend()
 	}
+	body, events := e.batch()
+	n := len(events)
 	status, retryAfter, err := e.post(body)
 	if err == nil && status >= 200 && status < 300 {
+		e.take(n)
 		e.backoff, e.resumeAt = 0, time.Time{}
 		if e.failing {
-			e.failing = false
+			e.failing, e.refused = false, 0
 			e.log.Info("analytics feed recovered", "status", status)
 		}
-		e.sent.Add(n)
+		e.sent.Add(uint64(len(events)))
 		return true
 	}
 	if err == nil {
@@ -318,33 +393,28 @@ func (e *Emitter) send(body []byte, n uint64, until time.Time, final bool) (ok b
 	}
 	switch {
 	case status == http.StatusBadRequest || status == http.StatusRequestEntityTooLarge:
-		// This batch was refused, not the feed: dropped, no pause.
-		e.noteFailure(err, "batch dropped", 0)
-		e.failed.Add(n)
+		// Trakk answered and refused this batch, not the feed: no pause.
+		e.backoff, e.resumeAt = 0, time.Time{}
+		e.noteFailure(err, "batch dropped", status, 0)
+		e.take(n)
+		e.failed.Add(uint64(len(events)))
 		return true
 	case retryable(status):
-		// The pause is in place before a counter moves: whoever sees the counter sees the pause.
-		pause := e.pause(retryAfter)
-		if until.IsZero() {
-			until = e.tun.now().Add(e.tun.retryWindow)
+		what := "batch held for a retry"
+		if final {
+			what = "batch dropped"
 		}
-		if !final && e.resumeAt.Before(until) {
-			e.retry = &held{body: body, n: n, until: until}
-			e.noteFailure(err, "batch held for a retry", pause)
-			return false
+		e.noteFailure(err, what, 0, e.pause(retryAfter))
+		for i := range events {
+			events[i].tried = true
 		}
-		e.noteFailure(err, "batch dropped", pause)
 	default:
-		// 401 and the rest: Trakk refuses the feed and will again, so the batch goes and the feed pauses.
-		e.noteFailure(err, "batch dropped", e.pause(0))
+		// The pause is in place before a counter moves: whoever sees the counter sees the pause.
+		e.noteFailure(err, "batch dropped", status, e.pause(0))
+		e.take(n)
+		e.failed.Add(uint64(len(events)))
 	}
-	e.failed.Add(n)
 	return false
-}
-
-// retryable is the contract's "send the same batch again": no answer (status 0), 408, 429 or a 5xx.
-func retryable(status int) bool {
-	return status == 0 || status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
 }
 
 // pause is the next back-off: Retry-After when the answer gave one, else doubling from backoffMin; capped.
@@ -363,12 +433,16 @@ func (e *Emitter) pause(retryAfter time.Duration) time.Duration {
 }
 
 // noteFailure logs the first failure of a run at warn and the rest at debug: a dead Trakk must not flood the app's
-// log.
-func (e *Emitter) noteFailure(err error, what string, pause time.Duration) {
+// log. A refusal (its status; 0 for none) warns the first time too: it needs a hand, and Trakk may have been away
+// before it.
+func (e *Emitter) noteFailure(err error, what string, refusal int, pause time.Duration) {
 	lvl := slog.LevelDebug
-	if !e.failing {
-		e.failing = true
+	if !e.failing || refusal != 0 && refusal != e.refused {
 		lvl = slog.LevelWarn
+	}
+	e.failing = true
+	if refusal != 0 {
+		e.refused = refusal
 	}
 	e.log.Log(context.Background(), lvl, "analytics feed send failed, "+what, "err", err, "pause", pause)
 }
@@ -390,11 +464,7 @@ func (e *Emitter) post(body []byte) (int, time.Duration, error) {
 	// Drain a little so the connection can be reused; Trakk's answers are empty.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 	_ = resp.Body.Close()
-	var retryAfter time.Duration
-	if retryable(resp.StatusCode) {
-		retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), e.tun.now())
-	}
-	return resp.StatusCode, retryAfter, nil
+	return resp.StatusCode, parseRetryAfter(resp.Header.Get("Retry-After"), e.tun.now()), nil
 }
 
 // parseRetryAfter reads delta-seconds or an HTTP date; 0 when absent or unreadable.
