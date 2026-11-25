@@ -65,14 +65,18 @@ func TestSecretsOf(t *testing.T) {
 			[]string{"ntfy.example.com", "Disk alarms", "Disk+alarms"}},
 		{"ntfy://bob:hunter2hunter2@h.example.com/topic", "ntfy",
 			[]string{"hunter2hunter2", base64.StdEncoding.EncodeToString([]byte("bob:hunter2hunter2"))}, nil},
-		// generic forwards auth= and title= to the webhook: secrets there.
-		{"generic+https://h.example.com/x?auth=s3cretvalue&title=Disk+alarms", "generic",
-			[]string{"s3cretvalue", "Disk alarms"}, []string{"h.example.com"}},
+		// generic forwards auth=, a __-escaped key, a header and an extra to
+		// the webhook: secrets there. title= is its own setting.
+		{"generic+https://h.example.com/x?auth=s3cretvalue&title=Disk+alarms&__title=hidd3nvalue&$extra=extr4value", "generic",
+			[]string{"s3cretvalue", "hidd3nvalue", "extr4value"}, []string{"h.example.com", "Disk alarms"}},
 		{"generic+https://h.example.com/x?s3cretkey123", "generic", []string{"s3cretkey123"}, nil},
 		{"generic+https://h.example.com/x?@Authorization=Bearer+tok3n123", "generic",
 			[]string{"tok3n123", "Bearer tok3n123"}, nil},
 		{"generic+https://h.example.com/x?next=" + url.QueryEscape("https://y.example.com/hooks/s3cretpath"), "generic",
 			[]string{"s3cretpath"}, nil},
+		// A URL inside a value has no settings of its own.
+		{"generic+https://h.example.com/x?next=" + url.QueryEscape("https://y.example.com/?title=n3stedtitle"), "generic",
+			[]string{"n3stedtitle"}, nil},
 	} {
 		got := notify.SecretsOf(tc.url, tc.service)
 		for _, s := range tc.has {
@@ -85,5 +89,33 @@ func TestSecretsOf(t *testing.T) {
 				t.Errorf("%s: %q scrubbed", tc.url, s)
 			}
 		}
+	}
+}
+
+// The secrets are pooled over the channels: generic's own settings must not
+// turn ordinary words to *** in another channel's error, a key it forwards
+// still does.
+func TestScrubKeepsGenericSettings(t *testing.T) {
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 40001, "http": 400,
+			"error": "unsupported content type application/json in message subject, auth hunter2hunter2"})
+	}))
+	defer ntfy.Close()
+	hook := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer hook.Close()
+	c, err := notify.NewChannels([]string{
+		"ntfy://" + strings.TrimPrefix(ntfy.URL, "http://") + "/topic?scheme=http",
+		"generic+" + hook.URL + "/hook?contenttype=application/json&messagekey=content&titlekey=subject&auth=hunter2hunter2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.Send("t", "b")
+	if err == nil {
+		t.Fatal("the ntfy channel accepted the message")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "unsupported content type application/json in message subject, auth ***") {
+		t.Errorf("err = %v", err)
 	}
 }

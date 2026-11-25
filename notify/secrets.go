@@ -20,10 +20,9 @@ var placeholderUsers = map[string]bool{"pushover": true}
 
 // settingKeys are the query keys of smtp, ntfy, pushover, gotify and
 // telegram whose values are settings or display text, never a credential:
-// scrubbed, "markdown" or a title's words would turn to *** in every error.
-// None of them is tagged sensitive in the fork. Not for generic: it forwards
-// a key it does not know to the webhook, so there any name may carry a
-// secret.
+// scrubbed, "markdown" or a title's words would turn to *** in every error,
+// every channel's, as the secrets are pooled. None of them is tagged
+// sensitive in the fork.
 var settingKeys = map[string]bool{
 	"title": true, "subject": true, "priority": true, "tags": true, "scheme": true,
 	"disabletls": true, "skiptlsverify": true, "insecureskipverify": true, "disabletlsverification": true,
@@ -31,6 +30,27 @@ var settingKeys = map[string]bool{
 	"notification": true, "usestarttls": true, "starttls": true, "usehtml": true,
 	"requirestarttls": true, "encryption": true, "auth": true, "timeout": true,
 	"useheader": true, "retry": true, "expire": true, "timestamp": true,
+}
+
+// genericKeys are the keys generic reads as its own settings (the fork's
+// generic Config). Any other key, "__"-escaped ones, @headers and $extras
+// go on to the webhook, so any of them may carry a secret.
+var genericKeys = map[string]bool{
+	"contenttype": true, "template": true, "title": true, "titlekey": true,
+	"messagekey": true, "method": true, "disabletls": true, "skiptlsverify": true,
+}
+
+// setting says whether a query key of the service holds a setting, not a
+// credential. service "" (a URL inside a value) has none.
+func setting(service, key string) bool {
+	key = strings.ToLower(key)
+	switch service {
+	case "":
+		return false
+	case "generic":
+		return genericKeys[key]
+	}
+	return settingKeys[key]
 }
 
 // secretsOf is every part of a channel URL that may be a credential, decoded
@@ -59,7 +79,7 @@ func secretsOf(raw, service string) []string {
 			}
 		}
 		if strings.Contains(s, "://") {
-			out = append(out, secretsOf(s, "generic")...)
+			out = append(out, secretsOf(s, "")...)
 		}
 	}
 	if u.User != nil {
@@ -91,7 +111,7 @@ func secretsOf(raw, service string) []string {
 		k, v, hasValue := strings.Cut(pair, "=")
 		if !hasValue {
 			v = k // a bare ?token
-		} else if key, err := url.QueryUnescape(k); err == nil && service != "generic" && settingKeys[strings.ToLower(key)] {
+		} else if key, err := url.QueryUnescape(k); err == nil && setting(service, key) {
 			continue
 		}
 		add(v)

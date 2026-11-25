@@ -393,30 +393,58 @@ func TestSeverity(t *testing.T) {
 
 // A channel that skips TLS verification keeps one client: its sends reuse
 // one connection instead of leaving a transport behind each.
+// A repeated key counts by its first value, as the fork reads it.
 func TestInsecureChannelReusesItsConnection(t *testing.T) {
-	var conns atomic.Int32
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"id":"x"}`))
-	}))
-	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
-		if s == http.StateNew {
-			conns.Add(1)
+	for _, query := range []string{"skiptlsverify=yes", "skiptlsverify=yes&skiptlsverify=no"} {
+		var conns atomic.Int32
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"id":"x"}`))
+		}))
+		srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+			if s == http.StateNew {
+				conns.Add(1)
+			}
 		}
+		srv.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
+		srv.StartTLS()
+		c, err := notify.NewChannels([]string{"ntfy://" + strings.TrimPrefix(srv.URL, "https://") + "/topic?" + query})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range 5 {
+			if err := c.Send("t", "b"); err != nil {
+				t.Fatalf("%s: %v", query, err)
+			}
+		}
+		if n := conns.Load(); n != 1 {
+			t.Errorf("%s: 5 sends opened %d connections", query, n)
+		}
+		srv.Close()
 	}
-	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
-	srv.StartTLS()
-	defer srv.Close()
-	c, err := notify.NewChannels([]string{"ntfy://" + strings.TrimPrefix(srv.URL, "https://") + "/topic?skiptlsverify=yes"})
+}
+
+// A SendError compares and matches itself.
+func TestSendErrorCompares(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer down.Close()
+	c, err := notify.NewChannels([]string{hook(down), hook(down)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for range 5 {
-		if err := c.Send("t", "b"); err != nil {
-			t.Fatal(err)
-		}
+	err = c.Send("t", "b")
+	var sendErr *notify.SendError
+	if !errors.As(err, &sendErr) {
+		t.Fatalf("err = %v", err)
 	}
-	if n := conns.Load(); n != 1 {
-		t.Errorf("5 sends opened %d connections", n)
+	inner := sendErr.Err
+	seen := map[error]bool{inner: true} // panics for an uncomparable error
+	if !seen[sendErr.Err] || !errors.Is(err, inner) || !errors.Is(inner, inner) {
+		t.Error("SendError.Err does not compare")
+	}
+	if errs := inner.(interface{ Unwrap() []error }).Unwrap(); len(errs) != 2 {
+		t.Errorf("unwraps to %d errors", len(errs))
 	}
 }
 
