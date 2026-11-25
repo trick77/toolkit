@@ -1,0 +1,82 @@
+package notify
+
+import (
+	"strings"
+	"unicode"
+)
+
+// defused swaps each character a channel reads as markup for a look-alike
+// that reads as nothing: Slack's <!channel> and <url|text>, Discord's
+// @everyone, ||spoilers|| and # headings, Markdown's emphasis, code and
+// [links](…), Telegram's #hashtags, a mail client's autolinked a@b.c and
+// example.com. Escaping with a backslash would show the backslash on every
+// plain-text channel (mail, Pushover, Gotify, a webhook).
+var defused = map[rune]rune{
+	'@': '＠', // U+FF20: no mention, no mail address
+	'.': '․', // U+2024: no bare domain to autolink
+	'<': '‹', // U+2039
+	'>': '›', // U+203A
+	'`': 'ˋ', // U+02CB
+	'*': '∗', // U+2217
+	'_': 'ˍ', // U+02CD
+	'~': '∼', // U+223C
+	'|': '∣', // U+2223
+	'[': '［', // U+FF3B
+	']': '］', // U+FF3D
+	'#': '＃', // U+FF03
+}
+
+// Plain makes untrusted text (a request path, a referrer, a user agent, an
+// error key) safe to put in a message: one line of at most max runes that no
+// channel formats, links or turns into a mention. It reads the same to a
+// person; it is no longer what was sent, so it is for display only.
+//
+// Control and invisible format characters go first (a CR/LF starts a new
+// line or mail header, a right-to-left override reverses what follows,
+// a zero-width space hides "://" from a check), then whitespace runs become
+// one space. Clipped text ends in "…", counted within max; max < 1 is "".
+func Plain(s string, max int) string {
+	if max < 1 {
+		return ""
+	}
+	var b strings.Builder
+	space := false
+	for _, r := range s {
+		switch {
+		case unicode.IsSpace(r) || unicode.IsControl(r):
+			space = b.Len() > 0
+			continue
+		case unicode.Is(unicode.Cf, r):
+			continue
+		}
+		if space {
+			b.WriteByte(' ')
+			space = false
+		}
+		if d, ok := defused[r]; ok {
+			r = d
+		}
+		b.WriteRune(r)
+	}
+	out := []rune(b.String())
+	// "https://" stays a link to an autolinker whatever follows it.
+	out = defuseSchemes(out)
+	if len(out) > max {
+		out = out[:max-1]
+		for len(out) > 0 && out[len(out)-1] == ' ' {
+			out = out[:len(out)-1]
+		}
+		out = append(out, '…')
+	}
+	return string(out)
+}
+
+// defuseSchemes turns every "://" into "∶//" (U+2236).
+func defuseSchemes(r []rune) []rune {
+	for i := 0; i+2 < len(r); i++ {
+		if r[i] == ':' && r[i+1] == '/' && r[i+2] == '/' {
+			r[i] = '∶'
+		}
+	}
+	return r
+}
