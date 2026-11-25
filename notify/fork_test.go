@@ -3,17 +3,24 @@ package notify_test
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
-	"github.com/nicholas-fedor/shoutrrr/pkg/router"
 	"github.com/nicholas-fedor/shoutrrr/pkg/types"
+
+	"github.com/trick77/toolkit/notify"
 )
 
 // These pin what notify relies on, or works around, in shoutrrr itself, so a
@@ -21,15 +28,64 @@ import (
 
 func locate(t *testing.T, u string) types.Service {
 	t.Helper()
-	r, err := router.NewWithOptions(log.New(io.Discard, "", 0), types.SenderOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := r.Locate(u)
+	s, err := notify.Locate(u)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s
+}
+
+// excluded are the fork's schemes notify leaves out on purpose.
+var excluded = []string{
+	"mqtt", "mqtts", // paho, gorilla/websocket
+	"xmpp", "xmpps", // mellium
+	"logger", // writes to a log, not to a person
+}
+
+// Every scheme in the fork's router is in Schemes or excluded, so a fork
+// upgrade that adds a service cannot leave it out unnoticed. Read from the
+// router's source: importing the router would build every service again.
+func TestForkServiceList(t *testing.T) {
+	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/nicholas-fedor/shoutrrr").Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	file := filepath.Join(strings.TrimSpace(string(out)), "pkg", "router", "servicemap.go")
+	f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fork []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		spec, ok := n.(*ast.ValueSpec)
+		if !ok || len(spec.Names) != 1 || spec.Names[0].Name != "serviceMap" || len(spec.Values) != 1 {
+			return true
+		}
+		for _, el := range spec.Values[0].(*ast.CompositeLit).Elts {
+			key, _ := strconv.Unquote(el.(*ast.KeyValueExpr).Key.(*ast.BasicLit).Value)
+			fork = append(fork, key)
+		}
+		return false
+	})
+	if len(fork) < 10 {
+		t.Fatalf("read %d schemes from %s: the fork moved its service map", len(fork), file)
+	}
+	ours := notify.Schemes()
+	for _, s := range fork {
+		if !slices.Contains(ours, s) && !slices.Contains(excluded, s) {
+			t.Errorf("the fork's %q is neither supported nor excluded", s)
+		}
+	}
+	for _, s := range append(slices.Clone(ours), excluded...) {
+		if !slices.Contains(fork, s) {
+			t.Errorf("%q is gone from the fork", s)
+		}
+	}
+	for _, s := range excluded {
+		if slices.Contains(ours, s) {
+			t.Errorf("%q is both supported and excluded", s)
+		}
+	}
 }
 
 // Channel URLs written for containrrr v0.8 (netra's live settings) still
@@ -45,7 +101,7 @@ func TestForkReadsV08URLs(t *testing.T) {
 		"discord://token@123456789012345678",
 		"slack://T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
 	} {
-		if _, err := router.NewWithOptions(log.New(io.Discard, "", 0), types.SenderOptions{}, u); err != nil {
+		if _, err := notify.NewChannels([]string{u}); err != nil {
 			t.Errorf("%s: %v", strings.SplitN(u, ":", 2)[0], err)
 		}
 	}

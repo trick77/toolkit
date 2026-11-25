@@ -22,10 +22,11 @@
   Consumers: netra, trakk. containrrr v0.8, measured in netra: services wrote a send's params into their own
   config (one message went out under another's title), took no context (a timed-out send ran on; router.Send leaked
   a goroutine per timeout), transport errors quoted the URL with its token. The fork fixed all three (fork_test.go pins
-  it); a service per send and the scrub stay, as no interface promises it. A service per send is closed after it:
-  MQTT keeps its broker connection open for a next send. router imports every service: MQTT (paho, gorilla/websocket) and
-  XMPP (mellium) come along. gorilla/websocket is a pseudo-version for GO-2026-6278 (no tag has the fix): drop the
-  pin once one does.
+  it); a service per send and the scrub stay, as no interface promises it.
+- notify: no shoutrrr `router`, our own service map (owner): the router imports every service, so every consumer
+  built MQTT (paho, gorilla/websocket with GO-2026-6278, no tag with the fix) and XMPP (mellium). Both stay out,
+  and the `logger` pseudo-service; a fork scheme in neither list fails TestForkServiceList. Never import the router,
+  not even from a test: it puts them back in go.mod. go.sum keeps their lines: the fork's pushbullet test imports the router.
 
 ## Git & CI
 

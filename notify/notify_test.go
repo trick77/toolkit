@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,7 +27,7 @@ func TestChannelsRejectBadURLWithoutQuotingIt(t *testing.T) {
 	if strings.Contains(err.Error(), "topsecret") {
 		t.Errorf("the error leaks a credential: %v", err)
 	}
-	if err.Error() != "channel 2 (nope): invalid URL" {
+	if err.Error() != "channel 2 (nope): unsupported service" {
 		t.Errorf("err = %q, want it to name the entry and nothing more", err)
 	}
 	if _, err := notify.NewChannels([]string{"no-scheme"}); err == nil || !strings.Contains(err.Error(), "no scheme") {
@@ -36,6 +37,30 @@ func TestChannelsRejectBadURLWithoutQuotingIt(t *testing.T) {
 	_, err = notify.NewChannels([]string{"generic+http://x:p4ssw0rd/"})
 	if err == nil || strings.Contains(err.Error(), "p4ssw0rd") {
 		t.Errorf("an unparsable URL: %v", err)
+	}
+}
+
+func TestUnsupportedServices(t *testing.T) {
+	for in, want := range map[string]string{
+		"mqtt://u:s3cretpw@broker:1883/topic":    "channel 1 (mqtt): unsupported service",
+		"mqtts://u:s3cretpw@broker/topic":        "channel 1 (mqtts): unsupported service",
+		"xmpp://u:s3cretpw@example.com?to=a@b.c": "channel 1 (xmpp): unsupported service",
+		"logger://":                              "channel 1 (logger): unsupported service",
+		"nope://x:s3cretpw@y":                    "channel 1 (nope): unsupported service",
+		"ntfy+https://s3cretpw@ntfy.sh/t":        "channel 1 (ntfy+https): invalid URL", // no custom form
+		"ntfy://ntfy.sh/t?s3cretpw#":             "channel 1 (ntfy): invalid URL",       // the "#" would vanish
+	} {
+		_, err := notify.NewChannels([]string{in})
+		if err == nil || err.Error() != want {
+			t.Errorf("%s: err = %v, want %q", in, err, want)
+		}
+	}
+	schemes := notify.Schemes()
+	if !slices.IsSorted(schemes) || slices.Contains(schemes, "mqtt") || !slices.Contains(schemes, "smtp") {
+		t.Errorf("Schemes() = %q", schemes)
+	}
+	if _, err := notify.NewChannels([]string{"NTFY://ntfy.example.com/topic"}); err != nil {
+		t.Errorf("an upper-case scheme: %v", err)
 	}
 }
 

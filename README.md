@@ -111,6 +111,9 @@ A message takes at most `SendTimeout` (45 s) over all channels; what is still ou
 sets the priority on ntfy, Pushover, Gotify, Opsgenie, PagerDuty and Signalgrid unless the URL sets one, and
 changes nothing elsewhere.
 
+Every shoutrrr service but MQTT and XMPP (`notify.Schemes()` lists them, for a config error to show): those two
+would build a WebSocket and an XMPP stack into every app.
+
 ## Development
 
 The gate is [ship](https://github.com/trick77/ship): `ship check` locally, and the pre-push hook runs it on every
