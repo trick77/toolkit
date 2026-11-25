@@ -24,6 +24,7 @@ var defused = map[rune]rune{
 	'[': '［', // U+FF3B
 	']': '］', // U+FF3D
 	'#': '＃', // U+FF03
+	'&': '＆', // U+FF06: no &#8238; bringing an override back in an HTML channel
 }
 
 // Plain makes untrusted text (a request path, a referrer, a user agent, an

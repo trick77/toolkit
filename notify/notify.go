@@ -289,6 +289,11 @@ func (c *Channels) sendOne(ctx context.Context, ch channel, m Message) error {
 		// never quoted, for the reason NewChannels gives.
 		return errors.New("could not set up the channel")
 	}
+	// MQTT keeps its broker connection open after a send, for the next one
+	// through the same service; there is none.
+	if closer, ok := service.(io.Closer); ok {
+		defer func() { _ = closer.Close() }()
+	}
 	// A map per send: generic writes into the params it is handed.
 	params := types.Params{types.TitleKey: m.Title}
 	if level, ok := levels[m.Severity]; ok && leveled[service.GetID()] {

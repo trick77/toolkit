@@ -21,6 +21,7 @@ func TestPlain(t *testing.T) {
 		{"code", "```rm -rf /```", "ˋˋˋrm -rf /ˋˋˋ"},
 		{"emphasis", "*bold* _it_ ~~del~~ ||spoiler||", "∗bold∗ ˍitˍ ∼∼del∼∼ ∣∣spoiler∣∣"},
 		{"heading", "# big", "＃ big"},
+		{"html entity", "a&#8238;b&lt;i&gt;", "a＆＃8238;b＆lt;i＆gt;"},
 		{"newlines", "a\r\nBcc: x\n\n\tb", "a Bcc: x b"},
 		{"control", "a\x00b\x1bc\U00000085d", "a b c d"},
 		{"line separator", "a\U00002028b\U00002029c", "a b c"},
@@ -60,7 +61,7 @@ func TestPlainClips(t *testing.T) {
 // Whatever comes in, what goes out is one line of valid UTF-8 within max,
 // with none of the characters a channel reads as markup.
 func TestPlainNeverLeaks(t *testing.T) {
-	nasty := "@everyone <!channel> [x](javascript:alert(1)) `a` *b* _c_ ~d~ |e| #f https://g.example\r\n" +
+	nasty := "@everyone <!channel> [x](javascript:alert(1)) `a` *b* _c_ ~d~ |e| #f https://g.example &#8238;\r\n" +
 		"\U0000202E\U0000200B\x00" + strings.Repeat("\U00000301", 50) + "\xff\xfe"
 	for max := 1; max < 120; max++ {
 		got := notify.Plain(nasty, max)
@@ -70,7 +71,7 @@ func TestPlainNeverLeaks(t *testing.T) {
 		if n := utf8.RuneCountInString(got); n > max {
 			t.Fatalf("max %d: %d runes", max, n)
 		}
-		if strings.ContainsAny(got, "@<>`*_~|[]#.") || strings.Contains(got, "://") {
+		if strings.ContainsAny(got, "@<>`*_~|[]#.&") || strings.Contains(got, "://") {
 			t.Fatalf("max %d: markup survived in %q", max, got)
 		}
 		for _, r := range got {
