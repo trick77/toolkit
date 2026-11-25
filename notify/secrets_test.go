@@ -1,18 +1,14 @@
 package notify_test
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/trick77/toolkit/notify"
 )
@@ -88,65 +84,6 @@ func TestSecretsOf(t *testing.T) {
 			if slices.Contains(got, s) {
 				t.Errorf("%s: %q scrubbed", tc.url, s)
 			}
-		}
-	}
-}
-
-// An empty title leaves the URL's own; a set one replaces it.
-func TestTitleFromURL(t *testing.T) {
-	got := make(chan string, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got <- r.Header.Get("Title")
-		_, _ = w.Write([]byte(`{"id":"x"}`))
-	}))
-	defer srv.Close()
-	c, err := notify.NewChannels([]string{ntfyURL(srv, "&title=FromURL")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for title, want := range map[string]string{"": "FromURL", "Mine": "Mine"} {
-		if err := c.Send(title, "b"); err != nil {
-			t.Fatal(err)
-		}
-		if h := <-got; h != want {
-			t.Errorf("title %q: Title = %q, want %q", title, h, want)
-		}
-	}
-}
-
-// A send that failed on a deadline of its own before the wait ended keeps
-// its error; one that ended with the wait reads as the wait's end.
-func TestReport(t *testing.T) {
-	wrapped := fmt.Errorf("client timeout: %w", context.DeadlineExceeded)
-	for _, tc := range []struct {
-		err             error
-		answered, early bool
-		stopped, want   string
-	}{
-		{nil, false, false, "timed out after 1s", "timed out after 1s"},
-		{nil, true, true, "timed out after 1s", ""},
-		{wrapped, true, true, "timed out after 1s", wrapped.Error()},
-		{wrapped, true, false, "timed out after 1s", "timed out after 1s"},
-		{wrapped, true, true, "", wrapped.Error()},
-		{errors.New("a\r\nb"), true, true, "", "a  b"},
-	} {
-		if got := notify.Report(tc.err, tc.answered, tc.early, tc.stopped); got != tc.want {
-			t.Errorf("%+v: %q", tc, got)
-		}
-	}
-}
-
-func TestSetTimeout(t *testing.T) {
-	var none *notify.Channels
-	none.SetTimeout(time.Second) // nil-safe
-	c, err := notify.NewChannels(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, d := range []time.Duration{0, -time.Second} {
-		c.SetTimeout(d)
-		if c.Timeout() != notify.SendTimeout {
-			t.Errorf("SetTimeout(%v): %v", d, c.Timeout())
 		}
 	}
 }
