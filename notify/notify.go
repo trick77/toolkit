@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/url"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +24,7 @@ const SendTimeout = 45 * time.Second
 // Severity is how urgent a message is. A service with a priority of its own
 // (ntfy, Pushover, Gotify, Opsgenie, PagerDuty, Signalgrid) sends at the
 // matching priority, unless its URL sets one; every other service ignores it.
+// Signalgrid has nothing below its default INFO: Low changes nothing there.
 type Severity string
 
 // The severities. Any other value, the empty one included, is Normal.
@@ -51,6 +51,12 @@ var leveled = map[string]bool{
 	"opsgenie": true, "pagerduty": true, "signalgrid": true,
 }
 
+// overrides are steps the level param cannot take: PagerDuty maps Error to
+// "error", its default, so High would change nothing there.
+var overrides = map[string]map[Severity]struct{ key, value string }{
+	"pagerduty": {High: {"severity", "critical"}},
+}
+
 // Message is one notification. The zero Severity is Normal.
 type Message struct {
 	Title    string
@@ -70,7 +76,22 @@ type channel struct {
 	url string
 	// label is "channel 2 (smtp)": the position and the scheme, never more.
 	label string
+	// service is the shoutrrr service ID, "googlechat" for hangouts://.
+	service string
+	// urlKeys are the URL's query keys, lower case: a priority the URL sets
+	// beats a severity.
+	urlKeys map[string]bool
+	// shared is the channel's one service where a service per send costs a
+	// login per message; gate serialises its sends.
+	shared types.Service
+	gate   chan struct{}
 }
+
+// sharedServices keep state per account across sends. Matrix with a user
+// logs in with the password and keeps the token: a service per send logged
+// in for every message. Not done for smtp's OAuth2 token or zulip's limits:
+// one extra request per message, and sends to one mail server would queue.
+var sharedServices = map[string]bool{"matrix": true}
 
 // Channels sends to every configured channel at once.
 //
@@ -79,7 +100,7 @@ type channel struct {
 // service has, with no way to answer at the timeout while a send still winds
 // down.
 type Channels struct {
-	channels []channel
+	channels []*channel
 	// secrets are the credential-bearing parts of every URL, scrubbed from
 	// any error before it can reach a log line.
 	secrets []string
@@ -96,30 +117,43 @@ func NewChannels(urls []string) (*Channels, error) {
 	c := &Channels{timeout: SendTimeout}
 	for i, u := range urls {
 		label := fmt.Sprintf("channel %d (%s)", i+1, Scheme(u))
-		if _, err := locate(u); err != nil {
+		service, err := locate(u)
+		if err != nil {
 			return nil, fmt.Errorf("%s: %w", label, err)
 		}
-		c.channels = append(c.channels, channel{url: u, label: label})
-		c.secrets = append(c.secrets, secretsOf(u)...)
+		ch := &channel{url: u, label: label, service: service.GetID(), urlKeys: map[string]bool{}}
+		if parsed, err := url.Parse(u); err == nil {
+			for k := range parsed.Query() {
+				ch.urlKeys[strings.ToLower(k)] = true
+			}
+		}
+		if sharedServices[ch.service] {
+			ch.shared, ch.gate = service, make(chan struct{}, 1)
+		}
+		c.channels = append(c.channels, ch)
+		c.secrets = append(c.secrets, secretsOf(u, ch.service)...)
 	}
-	// Longest first, so a token containing a shorter secret is scrubbed
-	// whole rather than leaving its tail behind.
-	sort.Slice(c.secrets, func(i, j int) bool { return len(c.secrets[i]) > len(c.secrets[j]) })
+	c.secrets = spellings(c.secrets)
 	return c, nil
 }
 
-// SetTimeout replaces SendTimeout. Call it before the first send.
-func (c *Channels) SetTimeout(d time.Duration) { c.timeout = d }
+// SetTimeout replaces SendTimeout. Call it before the first send. A
+// non-positive d is ignored: every send would fail at once.
+func (c *Channels) SetTimeout(d time.Duration) {
+	if c != nil && d > 0 {
+		c.timeout = d
+	}
+}
 
 // Send delivers to every channel at Normal severity. See SendMessage.
 func (c *Channels) Send(title, body string) error {
 	return c.SendMessage(Message{Title: title, Body: body})
 }
 
-// SendMessage delivers to every channel at once. It succeeds when at least
-// one channel accepted the message: retrying the whole message because one
-// of three channels is down would repeat it on the other two. A failure
-// comes back as a SendError naming the channels that failed.
+// SendMessage delivers to every channel at once. Any failure comes back as a
+// *SendError naming the channels that failed. With Partial set another
+// channel took the message: count it as sent, as retrying the whole message
+// because one of three channels is down would repeat it on the other two.
 //
 // Every error names its channel and is scrubbed of the URLs' credentials.
 func (c *Channels) SendMessage(m Message) error {
@@ -196,6 +230,7 @@ func (c *Channels) DeliverMessage(ctx context.Context, m Message) (out []Deliver
 
 	sendCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
+	deadline, _ := sendCtx.Deadline()
 
 	type result struct {
 		i   int
@@ -215,9 +250,15 @@ func (c *Channels) DeliverMessage(ctx context.Context, m Message) (out []Deliver
 
 	errs := make([]error, len(c.channels))
 	answered := make([]bool, len(c.channels))
+	// early: the send ended before sendCtx did, so a deadline in its error
+	// was its own (a client timeout), not the wait's.
+	early := make([]bool, len(c.channels))
 	record := func(r result) {
 		answered[r.i] = true
 		errs[r.i] = r.err
+		// A connection deadline (SMTP's) can fire a moment before the
+		// context's own timer.
+		early[r.i] = sendCtx.Err() == nil && time.Now().Before(deadline)
 	}
 wait:
 	for left := len(c.channels); left > 0; left-- {
@@ -247,20 +288,26 @@ wait:
 	}
 	out = make([]Delivery, len(c.channels))
 	for i, ch := range c.channels {
-		out[i].Channel = ch.label
-		switch {
-		case !answered[i]:
-			out[i].Err = errors.New(stopped)
-		case errs[i] == nil:
-		case stopped != "" && (errors.Is(errs[i], context.Canceled) || errors.Is(errs[i], context.DeadlineExceeded)):
-			// The service saw the same end of sendCtx a moment earlier:
-			// one wording, whichever side noticed first.
-			out[i].Err = errors.New(stopped)
-		default:
-			out[i].Err = errors.New(c.scrub(errs[i].Error()))
-		}
+		out[i] = Delivery{Channel: ch.label, Err: c.report(errs[i], answered[i], early[i], stopped)}
 	}
 	return out, finished
+}
+
+// report words one channel's outcome: stopped (why the wait ended, "" if it
+// did not) for a send still out or one that ended with the wait, its own
+// scrubbed error otherwise.
+func (c *Channels) report(err error, answered, early bool, stopped string) error {
+	switch {
+	case !answered:
+		return errors.New(stopped)
+	case err == nil:
+		return nil
+	case !early && stopped != "" && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)):
+		// The service saw the same end of sendCtx a moment earlier: one
+		// wording, whichever side noticed first.
+		return errors.New(stopped)
+	}
+	return errors.New(c.scrub(err.Error()))
 }
 
 // sendOne builds the channel's service afresh and sends through it. See
@@ -269,7 +316,10 @@ wait:
 // The fork's services take a context and end the send when it does (SMTP
 // included: its connection carries the deadline), so a timeout cancels
 // rather than abandons; v0.8 took none and a send outlived its timeout.
-func (c *Channels) sendOne(ctx context.Context, ch channel, m Message) error {
+func (c *Channels) sendOne(ctx context.Context, ch *channel, m Message) error {
+	if ch.shared != nil {
+		return c.sendShared(ctx, ch, m)
+	}
 	service, err := locate(ch.url)
 	if err != nil {
 		// Parsed at startup, so this is not a bad URL.
@@ -280,65 +330,44 @@ func (c *Channels) sendOne(ctx context.Context, ch channel, m Message) error {
 	if closer, ok := service.(io.Closer); ok {
 		defer func() { _ = closer.Close() }()
 	}
-	// A map per send: generic writes into the params it is handed.
-	params := types.Params{types.TitleKey: m.Title}
-	if level, ok := levels[m.Severity]; ok && leveled[service.GetID()] {
-		params.SetLevel(level)
-	}
+	params := ch.params(m)
 	if s, ok := service.(types.ContextSender); ok {
 		return s.SendContext(ctx, m.Body, &params)
 	}
 	return service.Send(m.Body, &params)
 }
 
-// scrub removes the URLs' credentials from an error text. The fork reduces
-// a request URL in its errors to scheme and host, but a server's answer
-// quoted back (a webhook echoing its path) is not covered.
-func (c *Channels) scrub(s string) string {
-	for _, secret := range c.secrets {
-		s = strings.ReplaceAll(s, secret, "***")
-		// net/http quotes a URL escaped, so scrub that spelling too.
-		if esc := url.PathEscape(secret); esc != secret {
-			s = strings.ReplaceAll(s, esc, "***")
-		}
+// sendShared sends through the channel's one service, one send at a time:
+// the interface does not promise concurrent sends are safe.
+func (c *Channels) sendShared(ctx context.Context, ch *channel, m Message) error {
+	select {
+	case ch.gate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return s
+	defer func() { <-ch.gate }()
+	params := ch.params(m)
+	if s, ok := ch.shared.(types.ContextSender); ok {
+		return s.SendContext(ctx, m.Body, &params)
+	}
+	return ch.shared.Send(m.Body, &params)
 }
 
-// secretsOf is every part of a channel URL that may be a credential: the
-// user and password, every path segment and every query value. The host is
-// left alone: it is not a secret and it is what makes an error readable.
-// Short parts (a port, "yes") are left too: scrubbing them would mangle the
-// message and they protect nothing.
-func secretsOf(raw string) []string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return nil
+// params are one send's, a map per send: generic writes into the params it
+// is handed.
+func (ch *channel) params(m Message) types.Params {
+	p := types.Params{}
+	// An empty title would replace the URL's own title=.
+	if m.Title != "" {
+		p[types.TitleKey] = m.Title
 	}
-	var out []string
-	add := func(s string) {
-		if len(s) >= 6 {
-			out = append(out, s)
-		}
+	if level, ok := levels[m.Severity]; ok && leveled[ch.service] {
+		p.SetLevel(level)
 	}
-	if u.User != nil {
-		add(u.User.Username())
-		if p, ok := u.User.Password(); ok {
-			add(p)
-		}
+	if o, ok := overrides[ch.service][m.Severity]; ok && !ch.urlKeys[o.key] {
+		p[o.key] = o.value
 	}
-	for _, seg := range strings.Split(u.Path, "/") {
-		add(seg)
-	}
-	for _, vs := range u.Query() {
-		for _, v := range vs {
-			add(v)
-			for _, part := range strings.Split(v, ",") {
-				add(part)
-			}
-		}
-	}
-	return out
+	return p
 }
 
 // SendError reports the channels a message failed on. Partial says another

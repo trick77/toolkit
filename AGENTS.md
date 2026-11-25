@@ -22,7 +22,8 @@
   Consumers: netra, trakk. containrrr v0.8, measured in netra: services wrote a send's params into their own
   config (one message went out under another's title), took no context (a timed-out send ran on; router.Send leaked
   a goroutine per timeout), transport errors quoted the URL with its token. The fork fixed all three (fork_test.go pins
-  it); a service per send and the scrub stay, as no interface promises it.
+  it); a service per send and the scrub stay, as no interface promises it. Matrix keeps one service per channel,
+  sends serialised: per send it logged in with the password for every message.
 - notify: no shoutrrr `router`, our own service map (owner): the router imports every service, so every consumer
   built MQTT (paho, gorilla/websocket with GO-2026-6278, no tag with the fix) and XMPP (mellium). Both stay out,
   and the `logger` pseudo-service; a fork scheme in neither list fails TestForkServiceList. Never import the router,
