@@ -103,13 +103,18 @@ err = ch.SendMessage(notify.Message{
 	Body:     "path " + notify.Plain(r.URL.Path, 200), // untrusted text: no mention, link or markup
 	Severity: notify.High,
 })
-// err == nil when at least one channel took it; a *notify.SendError names the channels that failed.
+var sendErr *notify.SendError
+if errors.As(err, &sendErr) && sendErr.Partial {
+	// Another channel took it: sent. Log sendErr.Failed, do not retry the whole message.
+} else if err != nil {
+	// No channel took it.
+}
 // Deliver/DeliverMessage answer per channel (a settings page's test button).
 ```
 
 A message takes at most `SendTimeout` (45 s) over all channels; what is still out then is cancelled. A severity
-sets the priority on ntfy, Pushover, Gotify, Opsgenie, PagerDuty and Signalgrid unless the URL sets one, and
-changes nothing elsewhere.
+sets the priority on ntfy, Pushover, Gotify, Opsgenie, PagerDuty (High: critical) and Signalgrid unless the URL
+sets one, and changes nothing elsewhere. Signalgrid has nothing below its default, so Low is a no-op there.
 
 Every shoutrrr service but MQTT and XMPP (`notify.Schemes()` lists them, for a config error to show): those two
 would build a WebSocket and an XMPP stack into every app.
