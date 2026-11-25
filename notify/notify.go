@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/url"
 	"regexp"
 	"sort"
@@ -15,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nicholas-fedor/shoutrrr/pkg/router"
 	"github.com/nicholas-fedor/shoutrrr/pkg/types"
 )
 
@@ -76,19 +74,16 @@ type channel struct {
 
 // Channels sends to every configured channel at once.
 //
-// Not shoutrrr's router.SendContext: it holds one service per URL across
-// sends (see channel), and returns only once every service has, with no
-// way to answer at the timeout while a send still winds down.
+// Not shoutrrr's router: it imports every service (see services), holds one
+// service per URL across sends (see channel), and returns only once every
+// service has, with no way to answer at the timeout while a send still winds
+// down.
 type Channels struct {
 	channels []channel
 	// secrets are the credential-bearing parts of every URL, scrubbed from
 	// any error before it can reach a log line.
 	secrets []string
 	timeout time.Duration
-	// router builds a service per send; locate serialises it, as nothing in
-	// shoutrrr promises Locate is safe for concurrent use.
-	router *router.ServiceRouter
-	locate sync.Mutex
 }
 
 // NewChannels parses the channel URLs. A bad URL is an error at startup, not
@@ -96,19 +91,13 @@ type Channels struct {
 //
 // The error never quotes the URL: it carries credentials (an SMTP password,
 // a bot token), and this error is logged. The caller names where the URLs
-// came from.
+// came from. A service outside Schemes is "unsupported service".
 func NewChannels(urls []string) (*Channels, error) {
-	// Discarded: services log their deprecation and TLS warnings here, once
-	// per service, and a service per send would repeat them on every message.
-	r, err := router.NewWithOptions(log.New(io.Discard, "", 0), types.SenderOptions{})
-	if err != nil {
-		return nil, err
-	}
-	c := &Channels{timeout: SendTimeout, router: r}
+	c := &Channels{timeout: SendTimeout}
 	for i, u := range urls {
 		label := fmt.Sprintf("channel %d (%s)", i+1, Scheme(u))
-		if _, err := r.Locate(u); err != nil {
-			return nil, fmt.Errorf("%s: invalid URL", label)
+		if _, err := locate(u); err != nil {
+			return nil, fmt.Errorf("%s: %w", label, err)
 		}
 		c.channels = append(c.channels, channel{url: u, label: label})
 		c.secrets = append(c.secrets, secretsOf(u)...)
@@ -281,16 +270,13 @@ wait:
 // included: its connection carries the deadline), so a timeout cancels
 // rather than abandons; v0.8 took none and a send outlived its timeout.
 func (c *Channels) sendOne(ctx context.Context, ch channel, m Message) error {
-	c.locate.Lock()
-	service, err := c.router.Locate(ch.url)
-	c.locate.Unlock()
+	service, err := locate(ch.url)
 	if err != nil {
-		// Parsed at startup, so this is not a bad URL; and its error is
-		// never quoted, for the reason NewChannels gives.
+		// Parsed at startup, so this is not a bad URL.
 		return errors.New("could not set up the channel")
 	}
-	// MQTT keeps its broker connection open after a send, for the next one
-	// through the same service; there is none.
+	// A service that holds a connection for its next send (the fork's MQTT
+	// did) has none: close it.
 	if closer, ok := service.(io.Closer); ok {
 		defer func() { _ = closer.Close() }()
 	}
