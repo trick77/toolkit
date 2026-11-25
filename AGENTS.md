@@ -21,8 +21,9 @@
 - notify: shoutrrr is the nicholas-fedor fork, not containrrr (owner's call, an exception to the 1k-star rule).
   Consumers: netra, trakk. containrrr v0.8, measured in netra: services wrote a send's params into their own
   config (one message went out under another's title), took no context (a timed-out send ran on; router.Send leaked
-  a goroutine per timeout), transport errors quoted the URL with its token. The fork fixed all three; a service per
-  send and the scrub stay, as nothing promises it. router imports every service: MQTT (paho, gorilla/websocket) and
+  a goroutine per timeout), transport errors quoted the URL with its token. The fork fixed all three (fork_test.go pins
+  it); a service per send and the scrub stay, as no interface promises it. A service per send is closed after it:
+  MQTT keeps its broker connection open for a next send. router imports every service: MQTT (paho, gorilla/websocket) and
   XMPP (mellium) come along. gorilla/websocket is a pseudo-version for GO-2026-6278 (no tag has the fix): drop the
   pin once one does.
 
