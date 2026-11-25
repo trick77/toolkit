@@ -20,7 +20,9 @@ import (
 // services are the ones the apps use (owner): each is build weight in every
 // app that notifies. Not the fork's router: it imports every service, MQTT
 // (paho, gorilla/websocket) and XMPP (mellium) included. Adding one is a
-// line here and its package import.
+// line here and its package import, plus its entries where they apply:
+// hostSecrets, placeholderUsers and settingKeys (secrets.go), leveled and
+// insecureKeys (notify.go).
 var services = map[string]func() types.Service{
 	"generic":  func() types.Service { return &generic.Service{} },
 	"gotify":   func() types.Service { return &gotify.Service{} },

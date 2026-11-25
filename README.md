@@ -117,7 +117,9 @@ sets the priority on ntfy, Pushover and Gotify unless the URL sets one, and chan
 
 Six services: `smtp`, `ntfy`, `pushover`, `gotify`, `telegram` and `generic` (webhooks, `generic+https://…`);
 `notify.Schemes()` lists them for a config error to show. Another of shoutrrr's is a line in the `services` map of
-`notify/services.go` plus its package import.
+`notify/services.go` plus its package import, and its entries where they apply: `hostSecrets`, `placeholderUsers`
+and `settingKeys` (what the scrub keeps or removes), `leveled` (whether a severity sets its priority) and
+`insecureKeys` (its TLS-skip key).
 
 ## Development
 

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -103,8 +104,9 @@ func TestForkReadsV08URLs(t *testing.T) {
 }
 
 // v0.8's ntfy wrote a send's params into its own config: concurrent sends
-// through one service crossed titles. notify still builds a service per send;
-// this says whether it still has to.
+// through one service crossed titles. notify builds a service per send but
+// for a URL that skips TLS verification, which shares one (see below); this
+// says whether the per-send rule still has to hold.
 func TestForkServiceSendsConcurrently(t *testing.T) {
 	var (
 		mu     sync.Mutex
@@ -137,6 +139,66 @@ func TestForkServiceSendsConcurrently(t *testing.T) {
 		if strings.TrimPrefix(body, "body ") != strings.TrimPrefix(title, "title ") {
 			t.Errorf("%q went out titled %q", body, title)
 		}
+	}
+}
+
+// A URL that skips TLS verification shares one service (and its insecure
+// client) across sends: concurrent sends through it, in every service that
+// speaks HTTP, keep their own title and body. Run with -race.
+func TestForkSharedServiceSendsConcurrently(t *testing.T) {
+	numbered := regexp.MustCompile(`(title|body) (\d+)`)
+	var (
+		mu       sync.Mutex
+		requests []string
+	)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		requests = append(requests, r.Header.Get("Title")+" "+string(b))
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"ok":true,"id":1,"result":{"message_id":1,"chat":{"id":1}}}`))
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "https://")
+	for name, u := range map[string]string{
+		"ntfy":     "ntfy://" + host + "/topic?skiptlsverify=yes",
+		"gotify":   "gotify://" + host + "/Abcdefghijklmno?skiptlsverify=yes",
+		"generic":  "generic+https://" + host + "/hook?skiptlsverify=yes",
+		"telegram": "telegram://123456789:AAbbCCddEEff@telegram?chats=1&skiptlsverify=yes&apiurl=" + url.QueryEscape(srv.URL),
+	} {
+		t.Run(name, func(t *testing.T) {
+			mu.Lock()
+			requests = nil
+			mu.Unlock()
+			c, err := notify.NewChannels([]string{u})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const n = 8
+			var wg sync.WaitGroup
+			for i := range n {
+				wg.Go(func() {
+					if err := c.Send(fmt.Sprintf("title %d", i), fmt.Sprintf("body %d", i)); err != nil {
+						t.Error(err)
+					}
+				})
+			}
+			wg.Wait()
+			mu.Lock()
+			defer mu.Unlock()
+			if len(requests) != n {
+				t.Fatalf("server saw %d messages, want %d", len(requests), n)
+			}
+			for _, req := range requests {
+				seen := map[string]string{}
+				for _, m := range numbered.FindAllStringSubmatch(req, -1) {
+					seen[m[1]] = m[2]
+				}
+				if seen["body"] == "" || (seen["title"] != "" && seen["title"] != seen["body"]) {
+					t.Errorf("crossed: %q", req)
+				}
+			}
+		})
 	}
 }
 

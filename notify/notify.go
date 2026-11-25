@@ -56,12 +56,13 @@ type Message struct {
 
 // channel is one configured URL and what is safe to say about it.
 //
-// The URL, not a service built from it once: shoutrrr's Service interface
-// does not promise concurrent Sends are safe. v0.8 services (ntfy, gotify,
-// pushover, bark, mattermost) wrote the message's params into their own
-// config, so one message went out under another's title. The fork copies
-// the config per send in every service read at v0.25.1, but a service per
-// send has no state to share whatever a later version does.
+// The URL, not a service built from it once, except where the URL skips TLS
+// verification (see shared): shoutrrr's Service interface does not promise
+// concurrent Sends are safe. v0.8 services (ntfy, gotify, pushover, bark,
+// mattermost) wrote the message's params into their own config, so one
+// message went out under another's title. The fork copies the config per
+// send in every service read at v0.25.1, but a service per send has no state
+// to share whatever a later version does.
 type channel struct {
 	url string
 	// label is "channel 2 (smtp)": the position and the scheme, never more.
@@ -78,15 +79,16 @@ type channel struct {
 // insecureKeys skip TLS verification. The fork builds the insecure HTTP
 // client once per service: a service per send left a transport, its idle
 // connections and their goroutines behind for every message. smtp's OAuth2
-// token cache is per service too: one token request per message, left so.
+// token cache is per service too, so a channel without a shared service
+// makes one token request per message; left so.
 var insecureKeys = []string{"skiptlsverify", "insecureskipverify", "disabletlsverification"}
 
 // skipsVerify says whether the URL turns TLS verification off, read as the
-// fork reads a bool.
+// fork reads it: the first value of a repeated key, as a bool.
 func skipsVerify(q url.Values) bool {
 	for k, vs := range q {
 		if slices.Contains(insecureKeys, strings.ToLower(k)) && len(vs) > 0 {
-			if on, ok := format.ParseBool(vs[len(vs)-1], false); ok && on {
+			if on, ok := format.ParseBool(vs[0], false); ok && on {
 				return true
 			}
 		}
@@ -97,7 +99,8 @@ func skipsVerify(q url.Values) bool {
 // Channels sends to every configured channel at once.
 //
 // Not shoutrrr's router: it imports every service (see services), holds one
-// service per URL across sends (see channel), and returns only once every
+// service per URL across sends (see channel for when notify does), and
+// returns only once every
 // service has, with no way to answer at the timeout while a send still winds
 // down.
 type Channels struct {
@@ -176,23 +179,23 @@ func (c *Channels) SendMessage(m Message) error {
 	return &SendError{
 		Failed:  labels,
 		Partial: len(failed) < len(c.channels),
-		Err:     joined(failed),
+		Err:     &joined{errs: failed},
 	}
 }
 
 // joined is errors.Join on one line: the text reaches a log line, and a
-// newline in it starts a forged one.
-type joined []error
+// newline in it starts a forged one. A pointer, so the error compares.
+type joined struct{ errs []error }
 
-func (j joined) Error() string {
-	parts := make([]string, len(j))
-	for i, err := range j {
+func (j *joined) Error() string {
+	parts := make([]string, len(j.errs))
+	for i, err := range j.errs {
 		parts[i] = err.Error()
 	}
 	return strings.Join(parts, "; ")
 }
 
-func (j joined) Unwrap() []error { return j }
+func (j *joined) Unwrap() []error { return j.errs }
 
 // oneLine turns the control characters of a server's text (a CR/LF, a
 // right-to-left override) into spaces: it goes into a log line.
@@ -335,8 +338,9 @@ func (c *Channels) report(err error, answered, early bool, stopped string) error
 	return errors.New(oneLine(c.scrub(err.Error())))
 }
 
-// sendOne builds the channel's service afresh and sends through it. See
-// channel for why it is not built once.
+// sendOne sends through the channel's shared service where it has one (a
+// URL that skips TLS verification), else through one built afresh. See
+// channel for why it is not built once otherwise.
 //
 // The fork's services take a context and end the send when it does (SMTP
 // included: its connection carries the deadline), so a timeout cancels
