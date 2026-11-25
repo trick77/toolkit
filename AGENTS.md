@@ -1,7 +1,7 @@
 # AGENTS.md
 
 - What lives here: shared libraries that are not base plumbing (integrations with the outside: mcpserver, llmwire,
-  webfetch, applemusic, analytics). Base functionality goes to ship's kit; a library for
+  webfetch, applemusic, analytics, notify). Base functionality goes to ship's kit; a library for
   one app stays in that app. User: kit "is more about common base functionality"; a repo per library "is totally
   overblown". llmwire and webfetch were own repos (archived after the move); their rules are their dir's AGENTS.md.
 - One module, one version line, a package per library. No nested go.mod: every new module costs release wiring.
@@ -18,6 +18,13 @@
   A 404 is retried: Traefik answers it while the collector's container is recreated, and each deploy of it lost every
   app's batches. Another 4xx drops the batch: kept, one a firewall refuses for its probe paths blocks the feed. `maxAge` < 1 h: Trakk files an event over an hour old at
   the receive time.
+- notify: shoutrrr is the nicholas-fedor fork, not containrrr (owner's call, an exception to the 1k-star rule).
+  Consumers: netra, trakk. containrrr v0.8, measured in netra: services wrote a send's params into their own
+  config (one message went out under another's title), took no context (a timed-out send ran on; router.Send leaked
+  a goroutine per timeout), transport errors quoted the URL with its token. The fork fixed all three; a service per
+  send and the scrub stay, as nothing promises it. router imports every service: MQTT (paho, gorilla/websocket) and
+  XMPP (mellium) come along. gorilla/websocket is a pseudo-version for GO-2026-6278 (no tag has the fix): drop the
+  pin once one does.
 
 ## Git & CI
 
