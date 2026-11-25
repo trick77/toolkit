@@ -68,29 +68,24 @@ func TestOrigin(t *testing.T) {
 
 func TestResolve(t *testing.T) {
 	for _, tc := range []struct {
-		name                 string
-		url, key, site, def  string
-		wantOrigin, wantSite string
-		wantFeed, wantWarn   bool
+		name               string
+		url, key           string
+		wantOrigin         string
+		wantFeed, wantWarn bool
 	}{
-		{name: "all unset: off", def: "lens.ipverse.net"},
-		{name: "key without URL: off, warned", key: "k", def: "lens.ipverse.net", wantWarn: true},
-		{name: "bad URL: off, warned", url: "analytics.example", key: "k", def: "lens.ipverse.net", wantWarn: true},
-		{name: "URL only: tracker, no feed", url: "https://analytics.example", def: "lens.ipverse.net",
-			wantOrigin: "https://analytics.example"},
-		{name: "URL and key: feed, site from PUBLIC_BASE_URL", url: "https://analytics.example", key: "k",
-			def: "lens.ipverse.net", wantOrigin: "https://analytics.example", wantFeed: true, wantSite: "lens.ipverse.net"},
-		{name: "ANALYTICS_SITE wins", url: "https://analytics.example", key: "k", site: "other.example", def: "lens.ipverse.net",
-			wantOrigin: "https://analytics.example", wantFeed: true, wantSite: "other.example"},
-		{name: "no site at all: tracker only, warned", url: "https://analytics.example", key: "k",
-			wantOrigin: "https://analytics.example", wantWarn: true},
+		{name: "all unset: off"},
+		{name: "key without URL: off, warned", key: "k", wantWarn: true},
+		{name: "bad URL: off, warned", url: "analytics.example", key: "k", wantWarn: true},
+		{name: "URL only: tracker, no feed", url: "https://analytics.example", wantOrigin: "https://analytics.example"},
+		{name: "URL and key: feed", url: "https://analytics.example", key: "k", wantOrigin: "https://analytics.example",
+			wantFeed: true},
 		{name: "key with a newline: tracker only, warned", url: "https://analytics.example", key: "a\nb",
-			def: "lens.ipverse.net", wantOrigin: "https://analytics.example", wantWarn: true},
-		{name: "plain http: feed, warned", url: "http://localhost:8090", key: "k", def: "lens.ipverse.net",
-			wantOrigin: "http://localhost:8090", wantFeed: true, wantSite: "lens.ipverse.net", wantWarn: true},
+			wantOrigin: "https://analytics.example", wantWarn: true},
+		{name: "plain http: feed, warned", url: "http://localhost:8090", key: "k", wantOrigin: "http://localhost:8090",
+			wantFeed: true, wantWarn: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, warns := Resolve(tc.url, tc.key, tc.site, tc.def)
+			s, warns := Resolve(tc.url, tc.key)
 			if s.Origin != tc.wantOrigin {
 				t.Errorf("Origin = %q, want %q", s.Origin, tc.wantOrigin)
 			}
@@ -98,9 +93,8 @@ func TestResolve(t *testing.T) {
 				t.Fatalf("Feed = %+v, want on=%v", s.Feed, tc.wantFeed)
 			}
 			if s.Feed != nil {
-				if s.Feed.Site != tc.wantSite || s.Feed.Key != tc.key || s.Feed.Endpoint != tc.wantOrigin+"/api/feed" {
-					t.Errorf("Feed = %+v, want site %q, key %q, endpoint %s/api/feed", s.Feed, tc.wantSite, tc.key,
-						tc.wantOrigin)
+				if s.Feed.Key != tc.key || s.Feed.Endpoint != tc.wantOrigin+"/api/feed" {
+					t.Errorf("Feed = %+v, want key %q, endpoint %s/api/feed", s.Feed, tc.key, tc.wantOrigin)
 				}
 			}
 			if (len(warns) > 0) != tc.wantWarn {

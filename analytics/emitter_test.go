@@ -74,7 +74,7 @@ func (c *clock) add(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-var testCfg = Config{Endpoint: "https://analytics.example/api/feed", Key: "feed-key-123", Site: "lens.ipverse.net"}
+var testCfg = Config{Endpoint: "https://analytics.example/api/feed", Key: "feed-key-123"}
 
 const testIP = "192.0.2.1"
 
@@ -112,7 +112,6 @@ func shutdown(t *testing.T, e *Emitter) {
 
 type body struct {
 	V      int              `json:"v"`
-	Site   string           `json:"site"`
 	Events []map[string]any `json:"events"`
 }
 
@@ -154,8 +153,11 @@ func TestEmitterSendsTheContract(t *testing.T) {
 		t.Errorf("Content-Type = %q", got)
 	}
 	b := decode(t, r.body)
-	if b.V != 1 || b.Site != "lens.ipverse.net" || len(b.Events) != 1 {
+	if b.V != 1 || len(b.Events) != 1 {
 		t.Fatalf("body = %+v", b)
+	}
+	if !bytes.HasPrefix(r.body, []byte(`{"v":1,"events":[{`)) {
+		t.Errorf("body %s: want no site, the key says it", r.body)
 	}
 	got := b.Events[0]
 	keys := make([]string, 0, len(got))

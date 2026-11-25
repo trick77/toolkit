@@ -65,15 +65,15 @@ Not covered: sessions, the GET stream, server-initiated requests, resources and 
 
 ## analytics
 
-`ANALYTICS_URL` alone loads the tracker, `ANALYTICS_FEED_KEY` adds the feed, `ANALYTICS_SITE` names the site the key
-belongs to. All empty: the app runs as without Trakk. A value that does not work turns its part off with a
+`ANALYTICS_URL` alone loads the tracker, `ANALYTICS_FEED_KEY` adds the feed. Trakk knows the site by its key, so a swapped
+one files under the wrong site; a Trakk older than 0.5.0 refuses the batches, and they are lost. Both empty: the app runs
+as without Trakk. A value that does not work turns its part off with a
 warning, never the app.
 
 ```go
 import "github.com/trick77/toolkit/analytics"
 
-set, warns := analytics.Resolve(os.Getenv("ANALYTICS_URL"), os.Getenv("ANALYTICS_FEED_KEY"),
-	os.Getenv("ANALYTICS_SITE"), "")
+set, warns := analytics.Resolve(os.Getenv("ANALYTICS_URL"), os.Getenv("ANALYTICS_FEED_KEY"))
 // set.Origin: add it to script-src and connect-src, load set.Origin + analytics.ScriptPath on every page.
 var feed *analytics.Emitter
 if set.Feed != nil {

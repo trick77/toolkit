@@ -39,11 +39,13 @@ const (
 	minLife = 2 * backoffMax
 )
 
+// prefix is the body up to the events array. It names no site: the key says it.
+const prefix = `{"v":1,"events":[`
+
 // Config says where the feed goes. Endpoint is Trakk's origin + FeedPath.
 type Config struct {
 	Endpoint string
 	Key      string
-	Site     string
 }
 
 // tuning holds the limits; tests shrink them.
@@ -87,7 +89,6 @@ type Emitter struct {
 	tun    tuning
 	client *http.Client
 	log    *slog.Logger
-	prefix []byte // the body up to the events array
 
 	ch       chan Event
 	stop     chan struct{}
@@ -129,7 +130,6 @@ func newEmitter(cfg Config, log *slog.Logger, tun tuning, transport http.RoundTr
 	if transport == nil {
 		transport = http.DefaultTransport.(*http.Transport).Clone()
 	}
-	prefix, _ := json.Marshal(cfg.Site)
 	hard, cancel := context.WithCancel(context.Background())
 	return &Emitter{
 		cfg: cfg,
@@ -141,7 +141,6 @@ func newEmitter(cfg Config, log *slog.Logger, tun tuning, transport http.RoundTr
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		log:        log,
-		prefix:     append(append([]byte(`{"v":1,"site":`), prefix...), `,"events":[`...),
 		ch:         make(chan Event, tun.bufferSize),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
@@ -238,7 +237,7 @@ func (e *Emitter) pausing() bool { return e.tun.now().Before(e.resumeAt) }
 // add puts ev into the backlog, the oldest making room for it.
 func (e *Emitter) add(ev Event) {
 	b, err := json.Marshal(ev)
-	if err != nil || e.envelope()+len(b) > e.tun.maxBody { // neither happens within the field limits; counted all the same
+	if err != nil || envelope+len(b) > e.tun.maxBody { // neither happens within the field limits; counted all the same
 		e.dropped.Add(1)
 		return
 	}
@@ -313,16 +312,16 @@ func (e *Emitter) expire() {
 }
 
 // envelope is the body's bytes around the events.
-func (e *Emitter) envelope() int { return len(e.prefix) + len("]}") }
+const envelope = len(prefix) + len("]}")
 
 // full reports whether the backlog holds a whole batch.
 func (e *Emitter) full() bool {
-	return len(e.backlog) >= e.tun.maxBatch || e.envelope()+e.size > e.tun.maxBody
+	return len(e.backlog) >= e.tun.maxBatch || envelope+e.size > e.tun.maxBody
 }
 
 // batch is the next body and the events it holds: the oldest that fit.
 func (e *Emitter) batch() ([]byte, []item) {
-	body := append(make([]byte, 0, min(e.tun.maxBody, e.envelope()+e.size)), e.prefix...)
+	body := append(make([]byte, 0, min(e.tun.maxBody, envelope+e.size)), prefix...)
 	n := 0
 	for ; n < len(e.backlog) && n < e.tun.maxBatch; n++ {
 		b := e.backlog[n].b
