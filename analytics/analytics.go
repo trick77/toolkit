@@ -96,12 +96,11 @@ type Settings struct {
 	Feed   *Config // the server feed; nil is off
 }
 
-// Resolve reads ANALYTICS_URL (rawURL), ANALYTICS_FEED_KEY and ANALYTICS_SITE; defaultSite (the app's public host, ""
-// for none) names the site when ANALYTICS_SITE is unset. A URL alone turns on the tracker, a key adds the feed. A value
-// that does not work turns the part it belongs to off and comes back as a warning: Trakk is optional, it never
-// stops the app from starting.
-func Resolve(rawURL, key, site, defaultSite string) (Settings, []string) {
-	rawURL, key, site = strings.TrimSpace(rawURL), strings.TrimSpace(key), strings.TrimSpace(site)
+// Resolve reads ANALYTICS_URL (rawURL) and ANALYTICS_FEED_KEY. A URL alone turns on the tracker, a key adds the feed; the
+// key says which site it is. A value that does not work turns the part it belongs to off and comes back as a warning:
+// Trakk is optional, it never stops the app from starting.
+func Resolve(rawURL, key string) (Settings, []string) {
+	rawURL, key = strings.TrimSpace(rawURL), strings.TrimSpace(key)
 	if rawURL == "" {
 		if key != "" {
 			return Settings{}, []string{"ANALYTICS_FEED_KEY is set without ANALYTICS_URL: Trakk off"}
@@ -116,22 +115,14 @@ func Resolve(rawURL, key, site, defaultSite string) (Settings, []string) {
 	if key == "" {
 		return s, nil
 	}
-	if site == "" {
-		site = defaultSite
+	if strings.ContainsFunc(key, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+		return s, []string{"ANALYTICS_FEED_KEY holds whitespace or control characters: Trakk feed off"}
 	}
-	var warns []string
-	switch {
-	case strings.ContainsFunc(key, func(r rune) bool { return r <= ' ' || r == 0x7f }):
-		warns = append(warns, "ANALYTICS_FEED_KEY holds whitespace or control characters: Trakk feed off")
-	case site == "":
-		warns = append(warns, "ANALYTICS_SITE is unset: Trakk feed off")
-	default:
-		if strings.HasPrefix(origin, "http://") {
-			warns = append(warns, "ANALYTICS_URL is plain http: the feed key travels unencrypted")
-		}
-		s.Feed = &Config{Endpoint: origin + FeedPath, Key: key, Site: site}
+	s.Feed = &Config{Endpoint: origin + FeedPath, Key: key}
+	if strings.HasPrefix(origin, "http://") {
+		return s, []string{"ANALYTICS_URL is plain http: the feed key travels unencrypted"}
 	}
-	return s, warns
+	return s, nil
 }
 
 // Event is one served request, exactly the fields Trakk's feed takes and nothing else: no raw header, query string,
