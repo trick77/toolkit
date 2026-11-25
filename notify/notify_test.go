@@ -2,10 +2,13 @@ package notify_test
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -386,4 +389,128 @@ func TestSeverity(t *testing.T) {
 			t.Errorf("High changed the webhook body: %q, Normal sent %q", high, normal)
 		}
 	})
+}
+
+// A channel that skips TLS verification keeps one client: its sends reuse
+// one connection instead of leaving a transport behind each.
+func TestInsecureChannelReusesItsConnection(t *testing.T) {
+	var conns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"x"}`))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
+	srv.StartTLS()
+	defer srv.Close()
+	c, err := notify.NewChannels([]string{"ntfy://" + strings.TrimPrefix(srv.URL, "https://") + "/topic?skiptlsverify=yes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		if err := c.Send("t", "b"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := conns.Load(); n != 1 {
+		t.Errorf("5 sends opened %d connections", n)
+	}
+}
+
+// A server's error text is one line in the log, scrubbed in its JSON and
+// Basic auth spellings too, and the channels' errors are joined on it.
+func TestSendErrorIsOneLine(t *testing.T) {
+	const password = `pa"ss<wo\rd`
+	basic := base64.StdEncoding.EncodeToString([]byte("bob:" + password))
+	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		htmlEscaped := `pa\"ss\` + `u003cwo\\rd`
+		msg := "bad " + htmlEscaped + " | " + `pa\"ss<wo\\rd` + " | Basic " + basic + "\r\nFAKE: forged line\U00002028x"
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 40101, "http": 401, "error": msg})
+	}))
+	defer echo.Close()
+	u := "ntfy://bob:" + url.PathEscape(password) + "@" + strings.TrimPrefix(echo.URL, "http://") + "/topic?scheme=http"
+	c, err := notify.NewChannels([]string{u, u})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.Send("t", "b")
+	var sendErr *notify.SendError
+	if !errors.As(err, &sendErr) {
+		t.Fatalf("err = %v", err)
+	}
+	msg := err.Error()
+	if strings.ContainsAny(msg, "\r\n\U00002028") || !strings.Contains(msg, "; channel 2") {
+		t.Errorf("not one line: %q", msg)
+	}
+	for _, leak := range []string{"pa", basic} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("%q survived in %q", leak, msg)
+		}
+	}
+	if errs := sendErr.Err.(interface{ Unwrap() []error }).Unwrap(); len(errs) != 2 {
+		t.Errorf("unwraps to %d errors", len(errs))
+	}
+}
+
+// An empty title leaves the URL's own; a set one replaces it.
+func TestTitleFromURL(t *testing.T) {
+	got := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Get("Title")
+		_, _ = w.Write([]byte(`{"id":"x"}`))
+	}))
+	defer srv.Close()
+	c, err := notify.NewChannels([]string{ntfyURL(srv, "&title=FromURL")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for title, want := range map[string]string{"": "FromURL", "Mine": "Mine"} {
+		if err := c.Send(title, "b"); err != nil {
+			t.Fatal(err)
+		}
+		if h := <-got; h != want {
+			t.Errorf("title %q: Title = %q, want %q", title, h, want)
+		}
+	}
+}
+
+// A send that failed on a deadline of its own before the wait ended keeps
+// its error; one that ended with the wait reads as the wait's end.
+func TestReport(t *testing.T) {
+	wrapped := fmt.Errorf("client timeout: %w", context.DeadlineExceeded)
+	for _, tc := range []struct {
+		err             error
+		answered, early bool
+		stopped, want   string
+	}{
+		{nil, false, false, "timed out after 1s", "timed out after 1s"},
+		{nil, true, true, "timed out after 1s", ""},
+		{wrapped, true, true, "timed out after 1s", wrapped.Error()},
+		{wrapped, true, false, "timed out after 1s", "timed out after 1s"},
+		{wrapped, true, true, "", wrapped.Error()},
+		{errors.New("a\r\nb"), true, true, "", "a  b"},
+	} {
+		if got := notify.Report(tc.err, tc.answered, tc.early, tc.stopped); got != tc.want {
+			t.Errorf("%+v: %q", tc, got)
+		}
+	}
+}
+
+func TestSetTimeout(t *testing.T) {
+	var none *notify.Channels
+	none.SetTimeout(time.Second) // nil-safe
+	c, err := notify.NewChannels(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []time.Duration{0, -time.Second} {
+		c.SetTimeout(d)
+		if c.Timeout() != notify.SendTimeout {
+			t.Errorf("SetTimeout(%v): %v", d, c.Timeout())
+		}
+	}
 }

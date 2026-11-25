@@ -1,6 +1,8 @@
 package notify_test
 
 import (
+	"math"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode"
@@ -8,6 +10,23 @@ import (
 
 	"github.com/trick77/toolkit/notify"
 )
+
+func TestPlainBounds(t *testing.T) {
+	if got := notify.Plain("ab", math.MaxInt); got != "ab" {
+		t.Errorf("max MaxInt: %q", got)
+	}
+	big := strings.Repeat("/x-y", 1<<18) // 1 MiB
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	got := notify.Plain(big, 200)
+	runtime.ReadMemStats(&after)
+	if n := len([]rune(got)); n != 200 {
+		t.Errorf("%d runes", n)
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 64<<10 {
+		t.Errorf("a 1 MiB input took %d bytes for 200 runes", alloc)
+	}
+}
 
 func TestPlain(t *testing.T) {
 	for _, tc := range []struct{ name, in, want string }{
