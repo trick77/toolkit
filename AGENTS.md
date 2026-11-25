@@ -19,15 +19,10 @@
   app's batches. Another 4xx drops the batch: kept, one a firewall refuses for its probe paths blocks the feed. `maxAge` < 1 h: Trakk files an event over an hour old at
   the receive time.
 - notify: shoutrrr is the nicholas-fedor fork, not containrrr (owner's call, an exception to the 1k-star rule).
-  Consumers: netra, trakk. containrrr v0.8, measured in netra: services wrote a send's params into their own
-  config (one message went out under another's title), took no context (a timed-out send ran on; router.Send leaked
-  a goroutine per timeout), transport errors quoted the URL with its token. The fork fixed all three (fork_test.go pins
-  it); a service per send and the scrub stay, as no interface promises it. Matrix keeps one service per channel,
-  sends serialised: per send it logged in with the password for every message.
-- notify: no shoutrrr `router`, our own service map (owner): the router imports every service, so every consumer
-  built MQTT (paho, gorilla/websocket with GO-2026-6278, no tag with the fix) and XMPP (mellium). Both stay out,
-  and the `logger` pseudo-service; a fork scheme in neither list fails TestForkServiceList. Never import the router,
-  not even from a test: it puts them back in go.mod. go.sum keeps their lines: the fork's pushbullet test imports the router.
+  Consumers: netra, trakk. Six services only (owner): most are never needed, and each is build weight in every app
+  that notifies. Never import shoutrrr's router, not even from a test: it imports every service, MQTT (paho,
+  gorilla/websocket with GO-2026-6278) and XMPP (mellium) into go.mod and go.sum. Nor a service whose fork tests
+  import it (pushbullet's did): go.sum then lists them all again.
 
 ## Git & CI
 

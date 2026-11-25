@@ -35,16 +35,10 @@ func locate(t *testing.T, u string) types.Service {
 	return s
 }
 
-// excluded are the fork's schemes notify leaves out on purpose.
-var excluded = []string{
-	"mqtt", "mqtts", // paho, gorilla/websocket
-	"xmpp", "xmpps", // mellium
-	"logger", // writes to a log, not to a person
-}
-
-// Every scheme in the fork's router is in Schemes or excluded, so a fork
-// upgrade that adds a service cannot leave it out unnoticed. Read from the
-// router's source: importing the router would build every service again.
+// Every scheme of ours is still one of the fork's: services are opted in, so
+// a fork upgrade that renames or drops one fails here, one that adds a
+// service does not. Read from the router's source: importing the router
+// would build every service again.
 func TestForkServiceList(t *testing.T) {
 	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/nicholas-fedor/shoutrrr").Output()
 	if err != nil {
@@ -61,29 +55,32 @@ func TestForkServiceList(t *testing.T) {
 		if !ok || len(spec.Names) != 1 || spec.Names[0].Name != "serviceMap" || len(spec.Values) != 1 {
 			return true
 		}
-		for _, el := range spec.Values[0].(*ast.CompositeLit).Elts {
-			key, _ := strconv.Unquote(el.(*ast.KeyValueExpr).Key.(*ast.BasicLit).Value)
-			fork = append(fork, key)
+		// Any other shape reads as fewer schemes and fails below.
+		lit, ok := spec.Values[0].(*ast.CompositeLit)
+		if !ok {
+			return false
+		}
+		for _, el := range lit.Elts {
+			kv, ok := el.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			key, ok := kv.Key.(*ast.BasicLit)
+			if !ok {
+				continue
+			}
+			if s, err := strconv.Unquote(key.Value); err == nil {
+				fork = append(fork, s)
+			}
 		}
 		return false
 	})
 	if len(fork) < 10 {
 		t.Fatalf("read %d schemes from %s: the fork moved its service map", len(fork), file)
 	}
-	ours := notify.Schemes()
-	for _, s := range fork {
-		if !slices.Contains(ours, s) && !slices.Contains(excluded, s) {
-			t.Errorf("the fork's %q is neither supported nor excluded", s)
-		}
-	}
-	for _, s := range append(slices.Clone(ours), excluded...) {
+	for _, s := range notify.Schemes() {
 		if !slices.Contains(fork, s) {
 			t.Errorf("%q is gone from the fork", s)
-		}
-	}
-	for _, s := range excluded {
-		if slices.Contains(ours, s) {
-			t.Errorf("%q is both supported and excluded", s)
 		}
 	}
 }
@@ -98,8 +95,6 @@ func TestForkReadsV08URLs(t *testing.T) {
 		"gotify://gotify.example.com/sub/Abcdefghijklmno",
 		"telegram://123456789:AAbbCCddEEff@telegram?chats=@channel,-1001234&parsemode=HTML",
 		"generic+https://hooks.example.com/notify?token=abc",
-		"discord://token@123456789012345678",
-		"slack://T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
 	} {
 		if _, err := notify.NewChannels([]string{u}); err != nil {
 			t.Errorf("%s: %v", strings.SplitN(u, ":", 2)[0], err)

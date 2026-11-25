@@ -46,6 +46,8 @@ func TestUnsupportedServices(t *testing.T) {
 		"mqtts://u:s3cretpw@broker/topic":        "channel 1 (mqtts): unsupported service",
 		"xmpp://u:s3cretpw@example.com?to=a@b.c": "channel 1 (xmpp): unsupported service",
 		"logger://":                              "channel 1 (logger): unsupported service",
+		"discord://s3cretpw@123456789012345678":  "channel 1 (discord): unsupported service",
+		"matrix://u:s3cretpw@example.com/":       "channel 1 (matrix): unsupported service",
 		"nope://x:s3cretpw@y":                    "channel 1 (nope): unsupported service",
 		"ntfy+https://s3cretpw@ntfy.sh/t":        "channel 1 (ntfy+https): invalid URL", // no custom form
 		"ntfy://ntfy.sh/t?s3cretpw#":             "channel 1 (ntfy): invalid URL",       // the "#" would vanish
@@ -56,7 +58,7 @@ func TestUnsupportedServices(t *testing.T) {
 		}
 	}
 	schemes := notify.Schemes()
-	if !slices.IsSorted(schemes) || slices.Contains(schemes, "mqtt") || !slices.Contains(schemes, "smtp") {
+	if !slices.Equal(schemes, []string{"generic", "gotify", "ntfy", "pushover", "smtp", "telegram"}) {
 		t.Errorf("Schemes() = %q", schemes)
 	}
 	if _, err := notify.NewChannels([]string{"NTFY://ntfy.example.com/topic"}); err != nil {

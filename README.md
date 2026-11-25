@@ -18,7 +18,7 @@ One module, one version line. v0.x: a minor release may break callers, its relea
 | [`applemusic`](applemusic) | Apple Music API the way the music.apple.com web player reads it: the player's developer token (scraped from its bundle), the user's media-user-token for library calls. Catalog (songs by ISRC, search, album tracks) and the user's library, history and recommendations. Read-only, unofficial. |
 | [`llmwire`](llmwire) | OpenAI-compatible inference (and Claude over Anthropic's protocol): chat, tools, vision, embeddings, each model's quirks kept as data in `profiles.yaml`. See [its README](llmwire/README.md). Was `github.com/trick77/llmwire`. |
 | [`mcpserver`](mcpserver) | Stateless [MCP](https://modelcontextprotocol.io) server over streamable HTTP, JSON responses only. Answers the 2026-07-28 revision and the initialize-era ones (2025-11-25, 2025-06-18, 2025-03-26). |
-| [`notify`](notify) | Notifications through [shoutrrr](https://github.com/nicholas-fedor/shoutrrr) service URLs (mail, ntfy, Pushover, Gotify, Telegram, Slack, Discord, webhooks, ...): every channel at once, each one's result, credentials scrubbed from errors, a severity for the services with a priority. `Plain` makes request text safe to put in a message. |
+| [`notify`](notify) | Notifications through [shoutrrr](https://github.com/nicholas-fedor/shoutrrr) service URLs (mail, ntfy, Pushover, Gotify, Telegram, webhooks): every channel at once, each one's result, credentials scrubbed from errors, a severity for the services with a priority. `Plain` makes request text safe to put in a message. |
 | [`webfetch`](webfetch) | In-process Go port of the reference `mcp-server-fetch`: fetch a URL, extract the main content as Markdown, honour robots.txt, SSRF-guarded. See [its README](webfetch/README.md). Was `github.com/trick77/webfetch`. |
 
 ## mcpserver
@@ -113,11 +113,11 @@ if errors.As(err, &sendErr) && sendErr.Partial {
 ```
 
 A message takes at most `SendTimeout` (45 s) over all channels; what is still out then is cancelled. A severity
-sets the priority on ntfy, Pushover, Gotify, Opsgenie, PagerDuty (High: critical) and Signalgrid unless the URL
-sets one, and changes nothing elsewhere. Signalgrid has nothing below its default, so Low is a no-op there.
+sets the priority on ntfy, Pushover and Gotify unless the URL sets one, and changes nothing elsewhere.
 
-Every shoutrrr service but MQTT and XMPP (`notify.Schemes()` lists them, for a config error to show): those two
-would build a WebSocket and an XMPP stack into every app.
+Six services: `smtp`, `ntfy`, `pushover`, `gotify`, `telegram` and `generic` (webhooks, `generic+https://…`);
+`notify.Schemes()` lists them for a config error to show. Another of shoutrrr's is a line in the `services` map of
+`notify/services.go` plus its package import.
 
 ## Development
 

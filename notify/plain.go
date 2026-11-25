@@ -47,7 +47,9 @@ func Plain(s string, max int) string {
 	if max < 1 {
 		return ""
 	}
-	out := make([]rune, 0, min(len(s), 4*max))
+	// Bounded by the input, never by max (math.MaxInt), and the loop stops
+	// one rune past max: a megabyte of path costs max runes, not megabytes.
+	out := make([]rune, 0, min(len(s), max)+2)
 	space := false
 	for _, r := range s {
 		switch {
@@ -68,6 +70,9 @@ func Plain(s string, max int) string {
 			r = '∕'
 		}
 		out = append(out, r)
+		if len(out) > max {
+			break
+		}
 	}
 	if len(out) > max {
 		out = out[:max-1]

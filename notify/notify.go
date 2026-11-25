@@ -6,13 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	"github.com/nicholas-fedor/shoutrrr/pkg/format"
 	"github.com/nicholas-fedor/shoutrrr/pkg/types"
 )
 
@@ -21,10 +23,8 @@ import (
 // stays near its minute.
 const SendTimeout = 45 * time.Second
 
-// Severity is how urgent a message is. A service with a priority of its own
-// (ntfy, Pushover, Gotify, Opsgenie, PagerDuty, Signalgrid) sends at the
-// matching priority, unless its URL sets one; every other service ignores it.
-// Signalgrid has nothing below its default INFO: Low changes nothing there.
+// Severity is how urgent a message is. ntfy, Pushover and Gotify send at the
+// matching priority, unless the URL sets one; the other services ignore it.
 type Severity string
 
 // The severities. Any other value, the empty one included, is Normal.
@@ -44,18 +44,8 @@ var levels = map[Severity]types.MessageLevel{
 }
 
 // leveled are the services whose level param sets a priority. Elsewhere the
-// param is not ignored: generic adds it to its JSON body, Discord recolours
-// the embed.
-var leveled = map[string]bool{
-	"ntfy": true, "pushover": true, "gotify": true,
-	"opsgenie": true, "pagerduty": true, "signalgrid": true,
-}
-
-// overrides are steps the level param cannot take: PagerDuty maps Error to
-// "error", its default, so High would change nothing there.
-var overrides = map[string]map[Severity]struct{ key, value string }{
-	"pagerduty": {High: {"severity", "critical"}},
-}
+// param is not ignored: generic adds it to its JSON body.
+var leveled = map[string]bool{"ntfy": true, "pushover": true, "gotify": true}
 
 // Message is one notification. The zero Severity is Normal.
 type Message struct {
@@ -76,22 +66,33 @@ type channel struct {
 	url string
 	// label is "channel 2 (smtp)": the position and the scheme, never more.
 	label string
-	// service is the shoutrrr service ID, "googlechat" for hangouts://.
+	// service is the shoutrrr service ID.
 	service string
-	// urlKeys are the URL's query keys, lower case: a priority the URL sets
-	// beats a severity.
-	urlKeys map[string]bool
-	// shared is the channel's one service where a service per send costs a
-	// login per message; gate serialises its sends.
+	// shared is the channel's one service when its URL skips TLS
+	// verification. Sent through concurrently: the fork copies the config per
+	// send and guards its HTTP client holder with a mutex; its tests run
+	// concurrent sends on one service.
 	shared types.Service
-	gate   chan struct{}
 }
 
-// sharedServices keep state per account across sends. Matrix with a user
-// logs in with the password and keeps the token: a service per send logged
-// in for every message. Not done for smtp's OAuth2 token or zulip's limits:
-// one extra request per message, and sends to one mail server would queue.
-var sharedServices = map[string]bool{"matrix": true}
+// insecureKeys skip TLS verification. The fork builds the insecure HTTP
+// client once per service: a service per send left a transport, its idle
+// connections and their goroutines behind for every message. smtp's OAuth2
+// token cache is per service too: one token request per message, left so.
+var insecureKeys = []string{"skiptlsverify", "insecureskipverify", "disabletlsverification"}
+
+// skipsVerify says whether the URL turns TLS verification off, read as the
+// fork reads a bool.
+func skipsVerify(q url.Values) bool {
+	for k, vs := range q {
+		if slices.Contains(insecureKeys, strings.ToLower(k)) && len(vs) > 0 {
+			if on, ok := format.ParseBool(vs[len(vs)-1], false); ok && on {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // Channels sends to every configured channel at once.
 //
@@ -121,14 +122,13 @@ func NewChannels(urls []string) (*Channels, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", label, err)
 		}
-		ch := &channel{url: u, label: label, service: service.GetID(), urlKeys: map[string]bool{}}
+		ch := &channel{url: u, label: label, service: service.GetID()}
+		var query url.Values
 		if parsed, err := url.Parse(u); err == nil {
-			for k := range parsed.Query() {
-				ch.urlKeys[strings.ToLower(k)] = true
-			}
+			query = parsed.Query()
 		}
-		if sharedServices[ch.service] {
-			ch.shared, ch.gate = service, make(chan struct{}, 1)
+		if skipsVerify(query) {
+			ch.shared = service
 		}
 		c.channels = append(c.channels, ch)
 		c.secrets = append(c.secrets, secretsOf(u, ch.service)...)
@@ -176,8 +176,33 @@ func (c *Channels) SendMessage(m Message) error {
 	return &SendError{
 		Failed:  labels,
 		Partial: len(failed) < len(c.channels),
-		Err:     errors.Join(failed...),
+		Err:     joined(failed),
 	}
+}
+
+// joined is errors.Join on one line: the text reaches a log line, and a
+// newline in it starts a forged one.
+type joined []error
+
+func (j joined) Error() string {
+	parts := make([]string, len(j))
+	for i, err := range j {
+		parts[i] = err.Error()
+	}
+	return strings.Join(parts, "; ")
+}
+
+func (j joined) Unwrap() []error { return j }
+
+// oneLine turns the control characters of a server's text (a CR/LF, a
+// right-to-left override) into spaces: it goes into a log line.
+func oneLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // Delivery is what became of a message on one channel.
@@ -307,7 +332,7 @@ func (c *Channels) report(err error, answered, early bool, stopped string) error
 		// wording, whichever side noticed first.
 		return errors.New(stopped)
 	}
-	return errors.New(c.scrub(err.Error()))
+	return errors.New(oneLine(c.scrub(err.Error())))
 }
 
 // sendOne builds the channel's service afresh and sends through it. See
@@ -317,40 +342,19 @@ func (c *Channels) report(err error, answered, early bool, stopped string) error
 // included: its connection carries the deadline), so a timeout cancels
 // rather than abandons; v0.8 took none and a send outlived its timeout.
 func (c *Channels) sendOne(ctx context.Context, ch *channel, m Message) error {
-	if ch.shared != nil {
-		return c.sendShared(ctx, ch, m)
-	}
-	service, err := locate(ch.url)
-	if err != nil {
-		// Parsed at startup, so this is not a bad URL.
-		return errors.New("could not set up the channel")
-	}
-	// A service that holds a connection for its next send (the fork's MQTT
-	// did) has none: close it.
-	if closer, ok := service.(io.Closer); ok {
-		defer func() { _ = closer.Close() }()
+	service := ch.shared
+	if service == nil {
+		var err error
+		if service, err = locate(ch.url); err != nil {
+			// Parsed at startup, so this is not a bad URL.
+			return errors.New("could not set up the channel")
+		}
 	}
 	params := ch.params(m)
 	if s, ok := service.(types.ContextSender); ok {
 		return s.SendContext(ctx, m.Body, &params)
 	}
 	return service.Send(m.Body, &params)
-}
-
-// sendShared sends through the channel's one service, one send at a time:
-// the interface does not promise concurrent sends are safe.
-func (c *Channels) sendShared(ctx context.Context, ch *channel, m Message) error {
-	select {
-	case ch.gate <- struct{}{}:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	defer func() { <-ch.gate }()
-	params := ch.params(m)
-	if s, ok := ch.shared.(types.ContextSender); ok {
-		return s.SendContext(ctx, m.Body, &params)
-	}
-	return ch.shared.Send(m.Body, &params)
 }
 
 // params are one send's, a map per send: generic writes into the params it
@@ -363,9 +367,6 @@ func (ch *channel) params(m Message) types.Params {
 	}
 	if level, ok := levels[m.Severity]; ok && leveled[ch.service] {
 		p.SetLevel(level)
-	}
-	if o, ok := overrides[ch.service][m.Severity]; ok && !ch.urlKeys[o.key] {
-		p[o.key] = o.value
 	}
 	return p
 }
