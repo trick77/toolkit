@@ -1,45 +1,45 @@
 package notify
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"net/url"
 	"sort"
 	"strings"
 	"unicode"
 )
 
-// hostSecrets are the services whose URL host is a credential: the fork tags
-// it sensitive (ifttt, pushover, pushbullet, signalgrid) or reads its key
-// from it (wecom, notifiarr, slack's legacy token form).
-var hostSecrets = map[string]bool{
-	"ifttt": true, "pushover": true, "pushbullet": true, "signalgrid": true,
-	"wecom": true, "notifiarr": true, "slack": true,
-}
+// hostSecrets are the services whose URL host is a credential: Pushover's
+// is the user key (the fork tags it sensitive).
+var hostSecrets = map[string]bool{"pushover": true}
 
 // placeholderUsers are the services whose URL user is a fixed word
 // ("shoutrrr"), not an account.
-var placeholderUsers = map[string]bool{"pushover": true, "join": true}
+var placeholderUsers = map[string]bool{"pushover": true}
 
-// settingKeys are query keys whose values are settings or display text in
-// every service, never a credential: scrubbed, "markdown" or a title's words
-// would turn to *** in every error.
+// settingKeys are the query keys of smtp, ntfy, pushover, gotify and
+// telegram whose values are settings or display text, never a credential:
+// scrubbed, "markdown" or a title's words would turn to *** in every error.
+// None of them is tagged sensitive in the fork. Not for generic: it forwards
+// a key it does not know to the webhook, so there any name may carry a
+// secret.
 var settingKeys = map[string]bool{
 	"title": true, "subject": true, "priority": true, "tags": true, "scheme": true,
 	"disabletls": true, "skiptlsverify": true, "insecureskipverify": true, "disabletlsverification": true,
 	"markdown": true, "cache": true, "firebase": true, "parsemode": true, "preview": true,
-	"notification": true, "contenttype": true, "method": true, "template": true, "titlekey": true,
-	"messagekey": true, "color": true, "colorerror": true, "colorwarn": true, "colorinfo": true,
-	"colordebug": true, "splitlines": true, "json": true, "usestarttls": true, "starttls": true,
-	"usehtml": true, "requirestarttls": true, "encryption": true, "auth": true, "timeout": true,
-	"useheader": true, "level": true, "severity": true, "type": true, "format": true,
-	"retry": true, "expire": true, "timestamp": true,
+	"notification": true, "usestarttls": true, "starttls": true, "usehtml": true,
+	"requirestarttls": true, "encryption": true, "auth": true, "timeout": true,
+	"useheader": true, "retry": true, "expire": true, "timestamp": true,
 }
 
 // secretsOf is every part of a channel URL that may be a credential, decoded
-// and as written: user and password, every path segment, every query value
-// but a setting's, the pieces of a composite value ("Bearer <token>", a
-// list, a URL inside a value) and, for hostSecrets, the host. Any other host
-// stays: it is what makes an error readable. Parts under 6 bytes (a port,
-// "yes") protect nothing and would mangle the text.
+// and as written: user and password (and both as Basic auth), every path
+// segment, every query value but a setting's, a bare query key, the pieces of
+// a composite value ("Bearer <token>", a list, a URL inside a value) and, for
+// hostSecrets, the host. Any other host stays: it is what makes an error
+// readable. Parts under 6 bytes (a port, "yes") protect nothing and would
+// mangle the text.
 func secretsOf(raw, service string) []string {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -59,7 +59,7 @@ func secretsOf(raw, service string) []string {
 			}
 		}
 		if strings.Contains(s, "://") {
-			out = append(out, secretsOf(s, "")...)
+			out = append(out, secretsOf(s, "generic")...)
 		}
 	}
 	if u.User != nil {
@@ -68,6 +68,7 @@ func secretsOf(raw, service string) []string {
 		}
 		if p, ok := u.User.Password(); ok {
 			add(p)
+			add(base64.StdEncoding.EncodeToString([]byte(u.User.Username() + ":" + p)))
 		}
 		// As written: the URL's own escapes (%2b, %2B for a +) are not
 		// necessarily the ones Go would choose.
@@ -77,7 +78,7 @@ func secretsOf(raw, service string) []string {
 		}
 		add(pass)
 	}
-	if hostSecrets[service] && (service != "slack" || len(u.Path) > 1) {
+	if hostSecrets[service] {
 		add(u.Hostname())
 	}
 	for _, seg := range strings.Split(u.Path, "/") {
@@ -87,8 +88,10 @@ func secretsOf(raw, service string) []string {
 		add(seg)
 	}
 	for _, pair := range strings.Split(u.RawQuery, "&") {
-		k, v, _ := strings.Cut(pair, "=")
-		if key, err := url.QueryUnescape(k); err == nil && settingKeys[strings.ToLower(key)] {
+		k, v, hasValue := strings.Cut(pair, "=")
+		if !hasValue {
+			v = k // a bare ?token
+		} else if key, err := url.QueryUnescape(k); err == nil && service != "generic" && settingKeys[strings.ToLower(key)] {
 			continue
 		}
 		add(v)
@@ -116,8 +119,10 @@ func rawUserinfo(raw string) string {
 }
 
 // spellings adds the ways an error can quote each secret: net/http escapes a
-// path, a query and userinfo each its own way. Longest first, so a secret
-// containing a shorter one is scrubbed whole, not leaving its tail behind.
+// path, a query and userinfo each its own way, and a JSON body escapes
+// quotes and backslashes (and <, >, & unless told not to). Longest first, so
+// a secret containing a shorter one is scrubbed whole, not leaving its tail
+// behind.
 func spellings(secrets []string) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -128,6 +133,8 @@ func spellings(secrets []string) []string {
 			url.QueryEscape(s),
 			url.User(s).String(),
 			strings.TrimPrefix(url.UserPassword("", s).String(), ":"),
+			jsonString(s, true),
+			jsonString(s, false),
 		} {
 			if !seen[v] {
 				seen[v] = true
@@ -137,6 +144,15 @@ func spellings(secrets []string) []string {
 	}
 	sort.Slice(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
 	return out
+}
+
+// jsonString is s as a JSON string's content, without the quotes.
+func jsonString(s string, escapeHTML bool) string {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(escapeHTML)
+	_ = enc.Encode(s)
+	return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(b.String(), `"`), "\n"), `"`)
 }
 
 // scrub removes the URLs' credentials from an error text. The fork reduces
