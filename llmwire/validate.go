@@ -164,6 +164,9 @@ type wirePlan struct {
 	// summarizedThinking says to ask a Messages model for its thinking as a
 	// streamed summary (messages.go head comment).
 	summarizedThinking bool
+	// cacheSystem and cacheTail are the Messages cache marks the request's
+	// Cache intent asked for (CacheIntent); the other protocols cache unasked.
+	cacheSystem, cacheTail bool
 }
 
 // plan resolves a request against its profile and returns it coerced, ready to
@@ -226,6 +229,7 @@ func (c *Client) plan(req ChatRequest, stream bool) (*wirePlan, []Warning, error
 	v.checkMaxTokens(req)
 	v.checkAnswerBudget(req)
 	v.checkExtraBody(req)
+	v.checkCache(req)
 
 	if v.err != nil {
 		return nil, nil, v.err
@@ -248,6 +252,9 @@ func (c *Client) plan(req ChatRequest, stream bool) (*wirePlan, []Warning, error
 		includeUsage:       stream && p.Streaming.NeedsIncludeUsage && p.Streaming.AcceptsStreamOptions,
 		encryptedReasoning: p.WireAPI == WireResponses && p.Reasoning.Supported,
 		summarizedThinking: p.WireAPI == WireMessages && p.Reasoning.Supported,
+		// No system text, no system block to mark.
+		cacheSystem: p.WireAPI == WireMessages && v.out.Cache != CacheNone && systemText(v.out.Messages) != "",
+		cacheTail:   p.WireAPI == WireMessages && v.out.Cache == CacheConversation,
 	}, v.warnings, nil
 }
 
@@ -775,6 +782,44 @@ func (v *validation) checkExtraBody(req ChatRequest) {
 		}
 		v.reject("extra_body", fmt.Sprintf("ExtraBody must not set %q: %s", key, why))
 		return
+	}
+}
+
+// checkCache refuses a Cache value that names no intent, and one beside an
+// ExtraBody cache_control: the two would place marks neither the caller nor
+// this package chose alone, and a second top-level mark with another TTL is a
+// 400 on Messages.
+func (v *validation) checkCache(req ChatRequest) {
+	switch req.Cache {
+	case CacheNone:
+		return
+	case CacheSystem, CacheConversation:
+	default:
+		v.reject("cache", fmt.Sprintf("Cache %d names no CacheIntent", req.Cache))
+		return
+	}
+	if v.profile.WireAPI != WireMessages {
+		// Cached unasked; the intent sends nothing that could collide.
+		return
+	}
+	if _, set := req.ExtraBody["cache_control"]; set {
+		v.reject("cache", "Cache and ExtraBody cache_control both mark the request; set one")
+		return
+	}
+	// A system turn after the first conversation turn is hoisted into the
+	// top-level system (messages.go head comment), the first bytes of the
+	// cached prefix: every mark after it misses, and each write bills 1.25x.
+	seenTurn := false
+	for _, m := range req.Messages {
+		if m.Role != RoleSystem {
+			seenTurn = true
+			continue
+		}
+		if seenTurn {
+			v.warn(WarnOther, "cache", "a system turn after the conversation began is hoisted into the top-level "+
+				"system prompt, which rewrites the cached prefix: expect cache writes, not reads")
+			return
+		}
 	}
 }
 

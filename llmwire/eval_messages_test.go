@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -330,6 +331,49 @@ func TestProbe_MessagesCacheContainment(t *testing.T) {
 		if Tokens(a.Input.Total) != Tokens(b.Input.Total) || Tokens(b.Input.NoCache) >= Tokens(a.Input.NoCache)+Tokens(a.Input.CacheWrite) {
 			t.Errorf("FINDING containment: totals %d vs %d, nocache %d vs %d", Tokens(a.Input.Total), Tokens(b.Input.Total),
 				Tokens(a.Input.NoCache), Tokens(b.Input.NoCache))
+		}
+	})
+}
+
+// TestProbe_MessagesCacheIntent: the marks ChatRequest.Cache sends, on the
+// shapes they are for. CacheSystem over two requests that differ after the
+// system prompt: the second reads the system block. CacheConversation over a
+// conversation and the same one extended by a turn: the second reads at least
+// what the first wrote.
+func TestProbe_MessagesCacheIntent(t *testing.T) {
+	eachMessagesModel(t, func(t *testing.T, model string) {
+		c := messagesClient(t, model)
+		long := System(strings.Repeat("The quick brown fox jumps over the lazy dog near the riverbank at dawn. ", 400))
+		call := func(name string, cache CacheIntent, msgs ...Message) Usage {
+			t.Helper()
+			resp, _, err := messagesChat(t, c, model, ChatRequest{Messages: msgs, Cache: cache,
+				Reasoning: ReasoningEffort("low"), MaxTokens: ptr(500)})
+			if err != nil {
+				t.Fatalf("FINDING %s REJECTED: %v", name, err)
+			}
+			u := resp.Usage
+			t.Logf("%s: total %d nocache %d read %d write %d; cost %+v", name,
+				Tokens(u.Input.Total), Tokens(u.Input.NoCache), Tokens(u.Input.CacheRead), Tokens(u.Input.CacheWrite), u.Cost)
+			return u
+		}
+		// A per-run nonce after the system block keeps the tail cold, so a read
+		// on the second call can only be the system mark's.
+		nonce := fmt.Sprint(time.Now().UnixNano())
+		call("system 1", CacheSystem, long, User(nonce+": reply with the single word: ok"))
+		if u := call("system 2", CacheSystem, long, User(nonce+": reply with the single word: yes")); Tokens(u.Input.CacheRead) == 0 {
+			t.Errorf("FINDING CacheSystem: the second request read nothing")
+		}
+
+		first := []Message{long, User(nonce + ": name a colour, one word")}
+		resp, _, err := messagesChat(t, c, model, ChatRequest{Messages: first, Cache: CacheConversation,
+			Reasoning: ReasoningEffort("low"), MaxTokens: ptr(500)})
+		if err != nil {
+			t.Fatalf("FINDING conversation 1 REJECTED: %v", err)
+		}
+		wrote := Tokens(resp.Usage.Input.CacheWrite) + Tokens(resp.Usage.Input.CacheRead)
+		u := call("conversation 2", CacheConversation, append(first, resp.Assistant(), User("another, one word"))...)
+		if Tokens(u.Input.CacheRead) < wrote {
+			t.Errorf("FINDING CacheConversation: read %d of the %d the first turn cached", Tokens(u.Input.CacheRead), wrote)
 		}
 	})
 }

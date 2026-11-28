@@ -82,6 +82,90 @@ func TestRenderMessages_Body(t *testing.T) {
 	}
 }
 
+// The Cache intent becomes marks on Messages only: the system block for both
+// intents, the top-level breakpoint for a conversation, and nothing unasked.
+func TestRenderMessages_Cache(t *testing.T) {
+	c := testClient(t, nil)
+	mark := map[string]any{"type": "ephemeral"}
+	marked := []any{map[string]any{"type": "text", "text": "be brief", "cache_control": mark}}
+	for _, tc := range []struct {
+		name         string
+		model        string
+		cache        CacheIntent
+		system, tail any
+	}{
+		{"none", "claude-opus-5-5", CacheNone, "be brief", nil},
+		{"system", "claude-fable-5-2", CacheSystem, marked, nil},
+		{"conversation", "claude-opus-5-5", CacheConversation, marked, mark},
+		// The OpenAI-shaped endpoints cache unasked: nothing to send.
+		{"chat", "glm-5.3-flash", CacheConversation, nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := ChatRequest{Model: tc.model, Messages: []Message{System("be brief"), User("hi")}, Cache: tc.cache}
+			body := renderedBody(t, mustPlan(t, c, req, false))
+			if !reflect.DeepEqual(body["system"], tc.system) {
+				t.Errorf("system = %#v, want %#v", body["system"], tc.system)
+			}
+			if !reflect.DeepEqual(body["cache_control"], tc.tail) {
+				t.Errorf("cache_control = %#v, want %#v", body["cache_control"], tc.tail)
+			}
+		})
+	}
+
+	// No system turn: a conversation still gets its moving breakpoint.
+	body := renderedBody(t, mustPlan(t, c, ChatRequest{Model: "claude-opus-5-5",
+		Messages: []Message{User("hi")}, Cache: CacheConversation}, false))
+	if _, ok := body["system"]; ok || !reflect.DeepEqual(body["cache_control"], mark) {
+		t.Errorf("system %#v, cache_control %#v", body["system"], body["cache_control"])
+	}
+}
+
+func TestPlan_CacheRefusals(t *testing.T) {
+	c := testClient(t, nil)
+	for name, req := range map[string]ChatRequest{
+		"unknown intent": {Cache: CacheIntent(9)},
+		"both marks": {Cache: CacheSystem,
+			ExtraBody: map[string]any{"cache_control": map[string]any{"type": "ephemeral", "ttl": "1h"}}},
+	} {
+		req.Model, req.Messages, req.BestEffort = "claude-opus-5-5", []Message{User("hi")}, true
+		var unsupported *UnsupportedError
+		if _, _, err := c.plan(req, false); !errors.As(err, &unsupported) || unsupported.Feature != "cache" {
+			t.Errorf("%s: err = %v, want a cache refusal even under BestEffort", name, err)
+		}
+	}
+	// ExtraBody alone stays the caller's own reach, and beside the intent on a
+	// route where the intent sends nothing.
+	extra := map[string]any{"cache_control": map[string]any{"type": "ephemeral"}}
+	mustPlan(t, c, ChatRequest{Model: "claude-opus-5-5", Messages: []Message{User("hi")}, ExtraBody: extra}, false)
+	mustPlan(t, c, ChatRequest{Model: "glm-5.3-flash", Messages: []Message{User("hi")}, ExtraBody: extra,
+		Cache: CacheConversation}, false)
+}
+
+// CacheSystem with no system text marks nothing, and says nothing about a cache.
+func TestPlan_CacheSystemWithoutSystem(t *testing.T) {
+	pl := mustPlan(t, testClient(t, nil), ChatRequest{Model: "claude-opus-5-5",
+		Messages: []Message{System("  "), User("hi")}, Cache: CacheSystem}, false)
+	if pl.cacheSystem || pl.cacheTail {
+		t.Errorf("marks = %v %v, want none", pl.cacheSystem, pl.cacheTail)
+	}
+}
+
+// A system turn after the conversation began is hoisted to the front of the
+// prefix: the caller who asked for a cache is told it will not read.
+func TestPlan_CacheWarnsOnHoistedSystem(t *testing.T) {
+	c := testClient(t, nil)
+	_, warnings, err := c.plan(ChatRequest{Model: "claude-opus-5-5", Cache: CacheConversation,
+		Messages: []Message{System("be brief"), User("hi"), System("in German")}}, false)
+	if err != nil || len(warnings) != 1 || warnings[0].Feature != "cache" {
+		t.Errorf("err %v, warnings %v, want one cache warning", err, warnings)
+	}
+	_, warnings, _ = c.plan(ChatRequest{Model: "claude-opus-5-5", Cache: CacheConversation,
+		Messages: []Message{System("be brief"), System("in German"), User("hi")}}, false)
+	if len(warnings) != 0 {
+		t.Errorf("leading system turns: warnings %v, want none", warnings)
+	}
+}
+
 // The tool loop as a consumer runs it: Assistant() and the results appended,
 // the signed thinking block replayed verbatim before its call, the parallel
 // results merged into one user turn.
