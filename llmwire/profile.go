@@ -345,8 +345,15 @@ type Profile struct {
 	// model continues. Messages protocol only, where it is a per-model fact:
 	// claude-opus-5-5 answers it with a 400. False refuses such a request in
 	// plan, however it came to end there.
-	AssistantPrefill bool      `yaml:"assistant_prefill"`
-	Embedding        Embedding `yaml:"embedding"`
+	AssistantPrefill bool `yaml:"assistant_prefill"`
+	// MidConversationSystem: a system turn after the conversation began may go
+	// out where it stands, as a role "system" message, instead of hoisted into
+	// the top-level system. Messages protocol only, per model (Claude Sonnet 5
+	// refuses it). Hoisting rewrites the front of the prefix, which misses
+	// every cache mark after it and, on claude-fable-5-2, invalidates every
+	// signed thinking block replayed after it.
+	MidConversationSystem bool      `yaml:"mid_conversation_system"`
+	Embedding             Embedding `yaml:"embedding"`
 
 	// Cost is the published pay-as-you-go rate, or nil when no rate has been
 	// verified for this model. Nil is not "free": pricing reports Unpriced and
@@ -565,6 +572,8 @@ func (p Profile) validateEmbeddings(bad func(string, ...any) error) error {
 		return bad("an embeddings profile must not declare vision")
 	case p.AssistantPrefill:
 		return bad("an embeddings profile must not declare assistant_prefill")
+	case p.MidConversationSystem:
+		return bad("an embeddings profile must not declare mid_conversation_system")
 	case p.Output.JSONObject || p.Output.JSONSchema || p.Output.StrictSchema:
 		return bad("an embeddings profile must not declare structured output")
 	case p.Streaming.Supported || p.Streaming.NeedsIncludeUsage || p.Streaming.AcceptsStreamOptions || p.Streaming.BuffersToolArgs:
@@ -684,6 +693,10 @@ func (p Profile) validateChat(bad func(string, ...any) error) error {
 		// Read by the Messages plan only; elsewhere it would describe a check
 		// nothing runs.
 		return bad("assistant_prefill is a %q fact; wire_api is %q", WireMessages, p.WireAPI)
+	}
+	if p.MidConversationSystem && p.WireAPI != WireMessages {
+		// The other protocols send every system turn where it stands already.
+		return bad("mid_conversation_system is a %q fact; wire_api is %q", WireMessages, p.WireAPI)
 	}
 
 	switch p.WireAPI {

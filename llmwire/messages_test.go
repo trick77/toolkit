@@ -57,15 +57,18 @@ func TestRenderMessages_Body(t *testing.T) {
 		"model":  "claude-opus-5-5",
 		"stream": true,
 		// No cap asked: the required field goes out at the model's limit.
-		"max_tokens":     float64(128000),
-		"system":         "be brief\n\nin English",
+		"max_tokens": float64(128000),
+		// The closing system turn follows a user turn and ends the request:
+		// it goes out where it stands.
+		"system":         "be brief",
 		"thinking":       map[string]any{"type": "adaptive", "display": "summarized"},
 		"tool_choice":    map[string]any{"type": "auto"},
 		"stop_sequences": []any{"END"},
 		"output_config": map[string]any{"effort": "high",
 			"format": map[string]any{"type": "json_schema", "schema": map[string]any{"type": "object"}}},
-		"messages": []any{map[string]any{"role": "user",
-			"content": []any{map[string]any{"type": "text", "text": "weather in Bern?"}}}},
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "weather in Bern?"}}},
+			map[string]any{"role": "system", "content": "in English"}},
 	} {
 		if !reflect.DeepEqual(body[key], want) {
 			t.Errorf("%s = %#v, want %#v", key, body[key], want)
@@ -154,15 +157,78 @@ func TestPlan_CacheSystemWithoutSystem(t *testing.T) {
 // prefix: the caller who asked for a cache is told it will not read.
 func TestPlan_CacheWarnsOnHoistedSystem(t *testing.T) {
 	c := testClient(t, nil)
+	// Before a user turn: no place for it, hoisted.
 	_, warnings, err := c.plan(ChatRequest{Model: "claude-opus-5-5", Cache: CacheConversation,
-		Messages: []Message{System("be brief"), User("hi"), System("in German")}}, false)
+		Messages: []Message{System("be brief"), User("hi"), System("in German"), User("and?")}}, false)
 	if err != nil || len(warnings) != 1 || warnings[0].Feature != "cache" {
 		t.Errorf("err %v, warnings %v, want one cache warning", err, warnings)
+	}
+	// Last, after a user turn: sent in place, nothing rewritten.
+	_, warnings, _ = c.plan(ChatRequest{Model: "claude-opus-5-5", Cache: CacheConversation,
+		Messages: []Message{System("be brief"), User("hi"), System("in German")}}, false)
+	if len(warnings) != 0 {
+		t.Errorf("in-place system turn: warnings %v, want none", warnings)
 	}
 	_, warnings, _ = c.plan(ChatRequest{Model: "claude-opus-5-5", Cache: CacheConversation,
 		Messages: []Message{System("be brief"), System("in German"), User("hi")}}, false)
 	if len(warnings) != 0 {
 		t.Errorf("leading system turns: warnings %v, want none", warnings)
+	}
+}
+
+// Which system turns go out where they stand: after a user turn (tool results
+// count), last or before an assistant turn, a run as one; the rest hoisted.
+func TestRenderMessages_SystemInPlace(t *testing.T) {
+	c := testClient(t, nil)
+	call := ToolCall{ID: "t1", Type: "function", Name: "get_weather", Arguments: `{"city":"Bern"}`}
+	for _, tc := range []struct {
+		name     string
+		model    string
+		msgs     []Message
+		system   any
+		messages string
+	}{
+		{"leading stays top-level", "claude-opus-5-5",
+			[]Message{System("a"), User("u")}, "a", `[{"content":[{"text":"u","type":"text"}],"role":"user"}]`},
+		{"after tool results, last: a directive", "claude-fable-5-2",
+			[]Message{System("a"), User("u"), {Role: RoleAssistant, ToolCalls: []ToolCall{call}}, ToolResult("t1", "14"), System("answer now")},
+			"a", `[{"content":[{"text":"u","type":"text"}],"role":"user"},` +
+				`{"content":[{"id":"t1","input":{"city":"Bern"},"name":"get_weather","type":"tool_use"}],"role":"assistant"},` +
+				`{"content":[{"content":"14","tool_use_id":"t1","type":"tool_result"}],"role":"user"},` +
+				`{"content":"answer now","role":"system"}]`},
+		{"a run before an assistant turn goes out as one", "claude-opus-5-5",
+			[]Message{User("u"), System("b"), System("  "), System("c"), Assistant("ok"), User("v")},
+			nil, `[{"content":[{"text":"u","type":"text"}],"role":"user"},` +
+				`{"content":"b\n\nc","role":"system"},` +
+				`{"content":[{"text":"ok","type":"text"}],"role":"assistant"},{"content":[{"text":"v","type":"text"}],"role":"user"}]`},
+		{"before a user turn: hoisted", "claude-opus-5-5",
+			[]Message{System("a"), User("u"), System("b"), User("v")},
+			"a\n\nb", `[{"content":[{"text":"u","type":"text"},{"text":"v","type":"text"}],"role":"user"}]`},
+		{"after an assistant turn: hoisted", "claude-opus-5-5",
+			[]Message{User("u"), Assistant("ok"), System("b"), User("v")},
+			"b", `[{"content":[{"text":"u","type":"text"}],"role":"user"},` +
+				`{"content":[{"text":"ok","type":"text"}],"role":"assistant"},{"content":[{"text":"v","type":"text"}],"role":"user"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := renderedBody(t, mustPlan(t, c, ChatRequest{Model: tc.model, Messages: tc.msgs}, false))
+			if !reflect.DeepEqual(body["system"], tc.system) {
+				t.Errorf("system = %#v, want %#v", body["system"], tc.system)
+			}
+			if got, _ := json.Marshal(body["messages"]); string(got) != tc.messages {
+				t.Errorf("messages =\n%s\nwant\n%s", got, tc.messages)
+			}
+		})
+	}
+}
+
+// A profile without the bit hoists every system turn, as before.
+func TestRenderMessages_SystemHoistedWithoutTheBit(t *testing.T) {
+	doc := strings.ReplaceAll(string(embeddedProfiles), "mid_conversation_system: true", "mid_conversation_system: false")
+	c := testClient(t, registryFrom(t, doc))
+	body := renderedBody(t, mustPlan(t, c, ChatRequest{Model: "claude-opus-5-5",
+		Messages: []Message{User("u"), System("b")}}, false))
+	if body["system"] != "b" || len(body["messages"].([]any)) != 1 {
+		t.Errorf("system %#v, messages %#v", body["system"], body["messages"])
 	}
 }
 
@@ -573,7 +639,8 @@ func TestFromEnv_AnthropicProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, _ := reg.Lookup("claude-opus-5-5")
-	if p.APIKeyHeader != "" || len(p.Headers) != 0 || p.WireAPI != WireMessages {
+	// The proxy is untested with in-place system messages: a route hoists.
+	if p.APIKeyHeader != "" || len(p.Headers) != 0 || p.WireAPI != WireMessages || p.MidConversationSystem {
 		t.Errorf("gateway route = %+v", p)
 	}
 }
@@ -627,6 +694,12 @@ func TestProfileMessages_Validation(t *testing.T) {
 		p.AssistantPrefill = true
 		if p.validate() == nil {
 			t.Errorf("%s: assistant_prefill accepted", id)
+		}
+		p, _ = Default().Lookup(id)
+		p = p.clone()
+		p.MidConversationSystem = true
+		if p.validate() == nil {
+			t.Errorf("%s: mid_conversation_system accepted", id)
 		}
 	}
 }
