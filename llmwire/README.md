@@ -222,8 +222,15 @@ speaks nothing else. Both carry the model's reasoning across tool rounds, as
 encrypted items and as signed thinking blocks. A tool loop appends
 `resp.Assistant()`, never a turn rebuilt from `Content` and `ToolCalls`, so
 the reasoning goes back. An application using Claude sets
-`LLMWIRE_ANTHROPIC_API_KEY` and names the model; caching there is opt-in, with
-`ExtraBody: {"cache_control": {"type": "ephemeral"}}`.
+`LLMWIRE_ANTHROPIC_API_KEY` and names the model.
+
+**Caching is an intent.** `ChatRequest.Cache` says which part comes back within
+minutes: `CacheSystem` for one system prompt over many different requests,
+`CacheConversation` for a tool loop or a thread. Messages caches only what is
+marked, a write at 1.25x input and each read at 0.05x (Opus) or 0.025x (Fable),
+so a mark on a prefix that never returns is a surcharge: leave it off for
+one-off calls. The OpenAI-shaped endpoints cache unasked; the intent sends
+nothing there.
 
 Also out of scope, by design: vector stores, chunking, embedding caches, retry
 policy and prompt content. llmwire never retries; it parses `Retry-After` into a

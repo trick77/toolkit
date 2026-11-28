@@ -70,6 +70,14 @@ func (c *Client) logCall(s callSummary) {
 		if r := reasoningLabel(req.Reasoning); r != "" {
 			attrs = append(attrs, "reasoning", r)
 		}
+		// The marks sent, not the intent asked: CacheSystem with no system
+		// text sends none.
+		switch {
+		case pl.cacheTail:
+			attrs = append(attrs, "cache", "conversation")
+		case pl.cacheSystem:
+			attrs = append(attrs, "cache", "system")
+		}
 		if len(req.ExtraBody) > 0 {
 			attrs = append(attrs, "extra_body_keys", strings.Join(sortedKeys(req.ExtraBody), ","))
 		}

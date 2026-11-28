@@ -1325,7 +1325,7 @@ profiles:
     # 1M window at these rates, no long-context tier. MEASURED containment:
     # cache writes and reads sit beside input_tokens (FINDINGS.md), so the
     # write lane is priced on top, never subtracted. cache_write is the
-    # 5-minute rate: llmwire sends no cache_control, and a call that wrote to
+    # 5-minute rate, the only TTL ChatRequest.Cache sends; a call that wrote to
     # the 1-hour cache through ExtraBody is Unpriced rather than under-priced
     # (pricing.go). speed "fast" (2x) and inference_geo "us" (1.1x) are
     # refused in ExtraBody for the same reason.
@@ -1349,7 +1349,7 @@ profiles:
       is measured. A tool loop appends resp.Assistant() so the signed
       thinking blocks go back each round. No forced tool choice, no
       temperature or top_p, no json_object. Caching is opt-in through
-      ExtraBody cache_control. messages.go head comment.
+      ChatRequest.Cache. messages.go head comment.
 
   # ---------------------------------------------------------------------------
   # Anthropic, its own API. Sources: the claude-api skill reference for

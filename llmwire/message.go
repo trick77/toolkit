@@ -255,6 +255,41 @@ func ReasoningBalanced() ReasoningRequest { return reasoningBalanced{} }
 // MaxAnswerTokens adds the level's reasoning.overhead, as for every intent.
 func ReasoningDeep() ReasoningRequest { return reasoningDeep{} }
 
+// CacheIntent says which part of a request will be sent again soon, so the
+// endpoint should keep it.
+//
+// The OpenAI-shaped endpoints cache a repeated prefix unasked (FINDINGS.md:
+// gpt-6.x-sol wrote 6425 tokens to a 30-minute cache on a cold call, MiMo read
+// 10880 on the second), so the intent sends nothing there. Messages caches only
+// what a request marks, and a mark costs: the write bills 1.25x input, each
+// read 0.05x (claude-opus-5-5) or 0.025x (claude-fable-5-2), on the 5-minute
+// TTL every read refreshes. A mark on a prefix that never comes back is a 25 %
+// surcharge on its input, which is why caching is the caller's call and never a
+// default. A prefix under the model's minimum is not cached and costs nothing
+// extra: 512 tokens on both per the claude-api skill reference (read
+// 2026-11-28, which defers to the caching docs), NOT measured.
+//
+// The moving breakpoint looks back at most 20 positions for the previous
+// round's entry. A run of tool_use blocks counts as one, so does a run of
+// tool_result blocks (same reference), so a wide parallel round stays inside
+// it; a round adding over 20 other blocks (many images or text parts) misses
+// and rewrites the conversation once.
+type CacheIntent int
+
+const (
+	// CacheNone sends no mark.
+	CacheNone CacheIntent = iota
+	// CacheSystem says the system prompt recurs across requests that differ after
+	// it, such as one gate prompt run per item. Messages marks the system block,
+	// which caches the tools before it too.
+	CacheSystem
+	// CacheConversation says the whole request comes back extended, as each round
+	// of a tool loop or each turn of a thread does. Messages marks the system
+	// block and sends top-level cache_control, the endpoint's moving breakpoint
+	// on the last block, so every round reads what the one before wrote.
+	CacheConversation
+)
+
 // ChatRequest is one completion request, before profile resolution.
 //
 // Pointers where "unset" and "zero" differ: a temperature of 0 is a real
@@ -289,6 +324,10 @@ type ChatRequest struct {
 	// Stop sequences. Always sent when non-empty: no profile in the registry
 	// records an endpoint refusing them, so there is no capability to gate on.
 	Stop []string
+
+	// Cache says which part of this request comes back within minutes. The
+	// zero value leaves caching to the endpoint. See CacheIntent.
+	Cache CacheIntent
 
 	// ExtraBody is merged into the request body verbatim, for the long tail of
 	// provider-specific parameters this package does not model. Keys collide

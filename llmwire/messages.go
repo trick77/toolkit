@@ -34,6 +34,12 @@ import (
 //     never merged here; the endpoint joins consecutive ones itself
 //     (MEASURED), so plan refuses a replayed or calling turn placed between
 //     a call and its results, where joining would edit a signed turn.
+//   - Caching is the request's Cache intent (CacheIntent), never a default:
+//     a mark on the system block, and for a conversation the top-level
+//     cache_control too, both 5-minute. Two of the four breakpoints; an
+//     explicit mark before the automatic one with the same TTL is the
+//     documented combination for agent loops. A cached prefix is byte-exact,
+//     so a system turn hoisted from mid-conversation (above) rewrites it.
 //   - Thinking is sent as {"type":"adaptive","display":"summarized"} on a
 //     model that reasons. The display is visibility only, billed the same; the
 //     default ("omitted") streams thinking blocks with no text, so a long think
@@ -93,6 +99,13 @@ func renderMessagesBody(pl *wirePlan) ([]byte, error) {
 	}
 	if s := systemText(req.Messages); s != "" {
 		body["system"] = s
+		if pl.cacheSystem {
+			// A mark goes on a block, so the string becomes its one-block form.
+			body["system"] = []any{map[string]any{"type": "text", "text": s, "cache_control": ephemeralCache}}
+		}
+	}
+	if pl.cacheTail {
+		body["cache_control"] = ephemeralCache
 	}
 	if pl.summarizedThinking {
 		body["thinking"] = map[string]any{"type": "adaptive", "display": "summarized"}
@@ -133,6 +146,10 @@ func renderMessagesBody(pl *wirePlan) ([]byte, error) {
 	}
 	return json.Marshal(body)
 }
+
+// ephemeralCache is the 5-minute mark, the only TTL cost.cache_write prices:
+// a 1-hour write bills 2x and is Unpriced (pricing.go).
+var ephemeralCache = map[string]any{"type": "ephemeral"}
 
 // systemText is every system turn's text, in order, as the one top-level
 // system string.
