@@ -627,6 +627,38 @@ func TestProbe_MessagesEditedHistory(t *testing.T) {
 	})
 }
 
+// TestProbe_MessagesSystemInPlace: the directive a tool loop appends after the
+// results, sent where it stands (mid_conversation_system). It must be accepted
+// with round 1's signed turn replayed, the edit the hoisted form is refused
+// for, and with CacheConversation read what round 1 wrote.
+func TestProbe_MessagesSystemInPlace(t *testing.T) {
+	eachMessagesModel(t, func(t *testing.T, model string) {
+		c := messagesClient(t, model)
+		long := strings.Repeat("The quick brown fox jumps over the lazy dog near the riverbank at dawn. ", 400)
+		req := ChatRequest{Tools: []Tool{weatherTool}, Reasoning: ReasoningEffort("high"), MaxTokens: ptr(4000),
+			Cache: CacheConversation,
+			Messages: []Message{System("You are a terse assistant. " + long),
+				User("Think briefly about which Swiss city is the capital, then call get_weather for it.")}}
+		r1, _, err := messagesChat(t, c, model, req)
+		if err != nil || len(r1.ToolCalls) != 1 {
+			t.Fatalf("round 1: %v %+v", err, r1)
+		}
+		wrote := Tokens(r1.Usage.Input.CacheWrite) + Tokens(r1.Usage.Input.CacheRead)
+		req.Messages = append(req.Messages, r1.Assistant(), ToolResult(r1.ToolCalls[0].ID, `{"temp_c":14}`),
+			System("Answer now in German, one sentence, no further tool calls."))
+		r2, warnings, err := messagesChat(t, c, model, req)
+		if err != nil {
+			t.Fatalf("FINDING directive in place with a replayed signed turn REFUSED: %v", err)
+		}
+		u := r2.Usage
+		t.Logf("round 2: %q warnings %v read %d (round 1 cached %d) write %d", Truncate(r2.Content, 120), warnings,
+			Tokens(u.Input.CacheRead), wrote, Tokens(u.Input.CacheWrite))
+		if Tokens(u.Input.CacheRead) < wrote {
+			t.Errorf("FINDING round 2 read %d of the %d round 1 cached", Tokens(u.Input.CacheRead), wrote)
+		}
+	})
+}
+
 // TestProbe_MessagesDeepOverhead: thinking tokens at the profile's deep level
 // on chat-shaped prompts, uncapped in practice (32000), to size
 // reasoning.overhead for it. A sample, not a distribution: the figures go in

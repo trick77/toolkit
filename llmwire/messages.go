@@ -25,9 +25,14 @@ import (
 //   - max_tokens is REQUIRED. plan sends limits.max_output when the caller set
 //     no cap, which is what "no cap" means on the other protocols.
 //   - System turns are one top-level `system` string. A system message after
-//     the first turn is hoisted there too, in order: the protocol's own
-//     mid-conversation system role has placement rules (after a user turn, last
-//     or before an assistant turn) that a converted OpenAI history breaks.
+//     the first turn goes out where it stands, as a role "system" message, on
+//     a profile with mid_conversation_system where the protocol's placement
+//     rules allow (after a user turn, last or before an assistant turn:
+//     systemInPlace); a run of them as one. Every other one is hoisted into
+//     the top-level string, in order: a converted OpenAI history breaks those
+//     rules. Hoisting rewrites the front of the prefix: every cache mark after
+//     it misses, and claude-fable-5-2 invalidates the signed thinking blocks
+//     replayed after it (TestProbe_MessagesEditedHistory).
 //   - A tool result is a tool_result block in a USER turn, and consecutive
 //     user turns are merged into one, so a round of parallel tool results
 //     goes back as one user turn, as the protocol asks. Assistant turns are
@@ -39,7 +44,7 @@ import (
 //     cache_control too, both 5-minute. Two of the four breakpoints; an
 //     explicit mark before the automatic one with the same TTL is the
 //     documented combination for agent loops. A cached prefix is byte-exact,
-//     so a system turn hoisted from mid-conversation (above) rewrites it.
+//     so a hoisted system turn (above) rewrites it; plan warns.
 //   - Thinking is sent as {"type":"adaptive","display":"summarized"} on a
 //     model that reasons. The display is visibility only, billed the same; the
 //     default ("omitted") streams thinking blocks with no text, so a long think
@@ -86,7 +91,7 @@ func (pl *wirePlan) messages() bool { return pl.profile.WireAPI == WireMessages 
 // render.go invariant holds here too: every capability was decided in plan.
 func renderMessagesBody(pl *wirePlan) ([]byte, error) {
 	req := pl.req
-	turns, err := renderMessagesTurns(req.Messages)
+	turns, err := renderMessagesTurns(req.Messages, pl.systemInPlace)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +102,7 @@ func renderMessagesBody(pl *wirePlan) ([]byte, error) {
 	if req.MaxTokens != nil {
 		body[pl.capParam] = *req.MaxTokens
 	}
-	if s := systemText(req.Messages); s != "" {
+	if s := systemText(req.Messages, pl.systemInPlace); s != "" {
 		body["system"] = s
 		if pl.cacheSystem {
 			// A mark goes on a block, so the string becomes its one-block form.
@@ -151,12 +156,12 @@ func renderMessagesBody(pl *wirePlan) ([]byte, error) {
 // a 1-hour write bills 2x and is Unpriced (pricing.go).
 var ephemeralCache = map[string]any{"type": "ephemeral"}
 
-// systemText is every system turn's text, in order, as the one top-level
-// system string.
-func systemText(ms []Message) string {
+// systemText is the text of every system turn not sent in place, in order, as
+// the one top-level system string.
+func systemText(ms []Message, inPlace map[int]bool) string {
 	var parts []string
-	for _, m := range ms {
-		if m.Role == RoleSystem {
+	for i, m := range ms {
+		if m.Role == RoleSystem && !inPlace[i] {
 			if t := toolOutputText(m); hasText(t) {
 				parts = append(parts, t)
 			}
@@ -165,13 +170,31 @@ func systemText(ms []Message) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// messagesTurn is one turn on the wire, before merging.
+// messagesTurn is one turn on the wire, before merging. An in-place system
+// message carries Text, the plain string form the protocol documents for it;
+// every other turn carries Content blocks.
 type messagesTurn struct {
-	Role    string `json:"role"`
-	Content []any  `json:"content"`
+	Role    string
+	Content []any
+	Text    string
 }
 
-// renderMessagesTurns encodes the conversation, system turns excluded. Only
+func (t messagesTurn) MarshalJSON() ([]byte, error) {
+	if t.Role == string(RoleSystem) {
+		return json.Marshal(struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}{t.Role, t.Text})
+	}
+	return json.Marshal(struct {
+		Role    string `json:"role"`
+		Content []any  `json:"content"`
+	}{t.Role, t.Content})
+}
+
+// renderMessagesTurns encodes the conversation, hoisted system turns excluded;
+// the ones plan placed (systemInPlace) go out as role "system" messages with
+// string content, a run of them joined into one. Only
 // consecutive USER turns are merged: a round of tool results goes back as one
 // user turn, as the protocol asks, the results first (plan has refused
 // anything between a call and its results). Assistant turns are never merged,
@@ -179,10 +202,19 @@ type messagesTurn struct {
 // refuses every turn turnBlocks leaves empty (checkMessagesTurns); one
 // reaching here is plan's bug and an error, never an empty content array on
 // the wire.
-func renderMessagesTurns(ms []Message) ([]messagesTurn, error) {
+func renderMessagesTurns(ms []Message, inPlace map[int]bool) ([]messagesTurn, error) {
 	var out []messagesTurn
 	for i, m := range ms {
 		if m.Role == RoleSystem {
+			t := toolOutputText(m)
+			if !inPlace[i] || !hasText(t) {
+				continue
+			}
+			if n := len(out); n > 0 && out[n-1].Role == string(RoleSystem) {
+				out[n-1].Text += "\n\n" + t
+				continue
+			}
+			out = append(out, messagesTurn{Role: string(RoleSystem), Text: t})
 			continue
 		}
 		role, blocks := turnBlocks(m)

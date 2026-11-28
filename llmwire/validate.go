@@ -167,6 +167,9 @@ type wirePlan struct {
 	// cacheSystem and cacheTail are the Messages cache marks the request's
 	// Cache intent asked for (CacheIntent); the other protocols cache unasked.
 	cacheSystem, cacheTail bool
+	// systemInPlace holds the indexes of the system turns that go out where
+	// they stand on Messages (systemInPlace); every other one is hoisted.
+	systemInPlace map[int]bool
 }
 
 // plan resolves a request against its profile and returns it coerced, ready to
@@ -229,6 +232,9 @@ func (c *Client) plan(req ChatRequest, stream bool) (*wirePlan, []Warning, error
 	v.checkMaxTokens(req)
 	v.checkAnswerBudget(req)
 	v.checkExtraBody(req)
+	if p.WireAPI == WireMessages && p.MidConversationSystem {
+		v.inPlace = systemInPlace(v.out.Messages)
+	}
 	v.checkCache(req)
 
 	if v.err != nil {
@@ -253,8 +259,9 @@ func (c *Client) plan(req ChatRequest, stream bool) (*wirePlan, []Warning, error
 		encryptedReasoning: p.WireAPI == WireResponses && p.Reasoning.Supported,
 		summarizedThinking: p.WireAPI == WireMessages && p.Reasoning.Supported,
 		// No system text, no system block to mark.
-		cacheSystem: p.WireAPI == WireMessages && v.out.Cache != CacheNone && systemText(v.out.Messages) != "",
-		cacheTail:   p.WireAPI == WireMessages && v.out.Cache == CacheConversation,
+		cacheSystem:   p.WireAPI == WireMessages && v.out.Cache != CacheNone && systemText(v.out.Messages, v.inPlace) != "",
+		cacheTail:     p.WireAPI == WireMessages && v.out.Cache == CacheConversation,
+		systemInPlace: v.inPlace,
 	}, v.warnings, nil
 }
 
@@ -300,8 +307,10 @@ type validation struct {
 	// bug in a function documented as read-only.
 	out             ChatRequest
 	reasoningActive bool
-	warnings        []Warning
-	err             error
+	// inPlace is systemInPlace of out, on a profile with mid_conversation_system.
+	inPlace  map[int]bool
+	warnings []Warning
+	err      error
 }
 
 // reject records a MALFORMED request: something no endpoint would accept and
@@ -809,18 +818,62 @@ func (v *validation) checkCache(req ChatRequest) {
 	// A system turn after the first conversation turn is hoisted into the
 	// top-level system (messages.go head comment), the first bytes of the
 	// cached prefix: every mark after it misses, and each write bills 1.25x.
+	// One that goes out where it stands (systemInPlace) rewrites nothing.
 	seenTurn := false
-	for _, m := range req.Messages {
+	for i, m := range v.out.Messages {
 		if m.Role != RoleSystem {
 			seenTurn = true
 			continue
 		}
-		if seenTurn {
-			v.warn(WarnOther, "cache", "a system turn after the conversation began is hoisted into the top-level "+
-				"system prompt, which rewrites the cached prefix: expect cache writes, not reads")
+		if seenTurn && !v.inPlace[i] && hasText(toolOutputText(m)) {
+			v.warn(WarnOther, "cache", fmt.Sprintf("system turn %d is hoisted into the top-level system prompt, "+
+				"which rewrites the cached prefix: expect cache writes, not reads", i))
 			return
 		}
 	}
+}
+
+// systemInPlace picks the system turns after the conversation began that go
+// out where they stand, as role "system" messages, on a profile with
+// mid_conversation_system. The protocol places one only after a user turn
+// (tool results are one) and last or before an assistant turn; a run of them
+// goes out as one message, since a system message after a system message
+// follows no user turn. Every other system turn is hoisted, as on a profile
+// without the bit: a converted OpenAI history puts system turns anywhere.
+//
+// Placement reads what follows, so a turn sent in place as the last message is
+// hoisted in the next round when the caller appends a user turn straight after
+// it, which rewrites the prefix (cache, signed thinking). Append the reply
+// (resp.Assistant()) after a directive before the next user turn.
+// Source: the claude-api skill reference (read 2026-11-28), no beta header;
+// NOT measured beyond TestProbe_MessagesSystemInPlace.
+func systemInPlace(ms []Message) map[int]bool {
+	var out map[int]bool
+	var prev Role // the wire role of the last conversation turn
+	for i := 0; i < len(ms); {
+		if ms[i].Role != RoleSystem {
+			prev = ms[i].Role
+			if prev == RoleTool {
+				prev = RoleUser
+			}
+			i++
+			continue
+		}
+		end := i
+		for end < len(ms) && ms[end].Role == RoleSystem {
+			end++
+		}
+		if prev == RoleUser && (end == len(ms) || ms[end].Role == RoleAssistant) {
+			for k := i; k < end; k++ {
+				if out == nil {
+					out = map[int]bool{}
+				}
+				out[k] = true
+			}
+		}
+		i = end
+	}
+	return out
 }
 
 // checkProtocol covers what one wire protocol can carry and another cannot.
@@ -854,7 +907,7 @@ func (v *validation) checkProtocol(req ChatRequest) {
 			return
 		}
 		if messages && m.Role == RoleSystem && m.HasImage() {
-			// The system prompt is one top-level string here.
+			// A system turn goes out as a string, hoisted or in place.
 			v.reject("messages", fmt.Sprintf("message %d is a system turn carrying an image, "+
 				"which the %s protocol cannot send there", i, wire))
 			return
@@ -930,7 +983,9 @@ func (v *validation) checkProtocol(req ChatRequest) {
 // the history around it (a prefill nobody sent, a tool_use no longer followed
 // by its result), and moving a block can change what a turn says. What render
 // does rewrite is fixed and said where it happens: system turns go to the
-// top-level system string, a replayed turn goes as its ResponseItems, a
+// top-level system string unless systemInPlace sends one where it stands (a
+// role "system" message, possibly the last one on the wire), a replayed turn
+// goes as its ResponseItems, a
 // whitespace text block beside real content is left out (turnBlocks).
 //
 //   - A user or assistant turn with nothing to send is refused. The protocol

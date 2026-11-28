@@ -117,6 +117,10 @@ func (r *Registry) viaGateway(routes map[string]string) (*Registry, error) {
 		// host fields; resolve replaces provider and clears cost, and the
 		// host fields are re-read from the gateway's provider below.
 		p := route.resolve(*base)
+		// A role "system" message inside messages[] is the endpoint's own
+		// shape; whether the proxy passes it is untested, so a route hoists
+		// every system turn, the shape it has always sent.
+		p.MidConversationSystem = false
 		applyDefaults(&p)
 		if err := p.validate(); err != nil {
 			return nil, fmt.Errorf("llmwire: %s route for %q: %w", GatewayModelsEnv, id, err)
